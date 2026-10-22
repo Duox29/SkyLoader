@@ -1,0 +1,10 @@
+{
+  "id": "skyloader.sample.list-collection",
+  "name": "List Collection (sample)",
+  "version": "1.0.0",
+  "author": "SkyLoader Samples",
+  "description": "Sample plugin teaching ordered list operations (add/replace/remove/move/sort/clear) over the UI bridge.",
+  "dll": "list-collection.dll",
+  "ui": "ui",
+  "uiEntry": "index.html"
+}

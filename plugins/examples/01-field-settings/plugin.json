@@ -1,0 +1,10 @@
+{
+  "id": "skyloader.sample.field-settings",
+  "name": "Field Settings (sample)",
+  "version": "1.0.0",
+  "author": "SkyLoader Samples",
+  "description": "Sample plugin teaching scalar field get/set/reset over the UI bridge.",
+  "dll": "field-settings.dll",
+  "ui": "ui",
+  "uiEntry": "index.html"
+}

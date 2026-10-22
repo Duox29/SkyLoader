@@ -1,0 +1,10 @@
+{
+  "id": "skyloader.sample.struct-state",
+  "name": "Struct State (sample)",
+  "version": "1.0.0",
+  "author": "SkyLoader Samples",
+  "description": "Sample plugin teaching nested document state, dot-path access, patches, and plugin-pushed events.",
+  "dll": "struct-state.dll",
+  "ui": "ui",
+  "uiEntry": "index.html"
+}

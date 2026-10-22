@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>List Collection (sample)</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div>
+      <h1>List Collection</h1>
+      <p class="muted">Sample 02 — an ordered list exchanged with the plugin; the
+        plugin always replies with the authoritative array.</p>
+    </div>
+    <div class="meta" id="plugin-meta"></div>
+  </header>
+
+  <main>
+    <section class="panel">
+      <h2>Items <span id="stats" class="muted"></span></h2>
+      <div class="row">
+        <input id="new-item" type="text" maxlength="140" placeholder="Add a note…">
+        <button id="add" class="primary">Add</button>
+      </div>
+      <ul id="items" class="items"></ul>
+      <div class="buttons">
+        <button id="sort-asc">Sort A→Z</button>
+        <button id="sort-desc">Sort Z→A</button>
+        <button id="sort-reverse">Reverse</button>
+        <button id="clear" class="demo">Clear all</button>
+        <button id="demo-bad" class="demo">Demo: bad index</button>
+      </div>
+      <p id="error" class="error hidden"></p>
+    </section>
+
+    <section class="panel">
+      <h2>Wire log <span class="muted">(what crosses window.sky)</span></h2>
+      <pre id="wire" class="wire"></pre>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

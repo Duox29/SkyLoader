@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Struct State (sample)</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div>
+      <h1>Struct State</h1>
+      <p class="muted">Sample 03 — a nested document reached by dot paths, with
+        <code>tick</code> events pushed by the plugin.</p>
+    </div>
+    <div class="meta" id="plugin-meta"></div>
+  </header>
+
+  <main>
+    <p id="error-road" class="error hidden"></p>
+    <section class="panel">
+      <h2>Profile</h2>
+      <div class="form-grid">
+        <label for="nickname">Nickname
+          <input id="nickname" type="text" maxlength="60" autocomplete="off">
+        </label>
+        <label for="candles">Candles
+          <input id="candles" type="number" min="0" step="1">
+        </label>
+        <label for="realm">Home realm
+          <select id="realm">
+            <option value="Isle of Dawn">Isle of Dawn</option>
+            <option value="Daylight Prairie">Daylight Prairie</option>
+            <option value="Hidden Forest">Hidden Forest</option>
+            <option value="Valley of Triumph">Valley of Triumph</option>
+            <option value="Golden Wasteland">Golden Wasteland</option>
+            <option value="Vault of Knowledge">Vault of Knowledge</option>
+            <option value="Eye of Eden">Eye of Eden</option>
+          </select>
+        </label>
+        <label class="check" for="autoCollect">
+          <input id="autoCollect" type="checkbox"> Auto collect candles
+        </label>
+      </div>
+      <div class="buttons">
+        <button id="save-profile" class="primary">Patch profile + settings</button>
+        <button id="reload" class="primary">Reload</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Schedule <span id="schedule-stats" class="muted"></span></h2>
+      <ul id="schedule" class="items"></ul>
+      <div class="row">
+        <input id="when" type="text" maxlength="60" placeholder="22:00">
+        <input id="what" type="text" maxlength="60" placeholder="Wax run">
+        <button id="add-schedule" class="primary">Add</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Path explorer <span class="muted">(get-path / set-path)</span></h2>
+      <div class="row">
+        <input id="path-input" type="text" placeholder="profile.candles or schedule.0">
+        <button id="path-get">Read</button>
+      </div>
+      <div class="row">
+        <input id="path-value" type="text" placeholder='JSON value, e.g. 300 or {"when":"05:00"}'>
+        <button id="path-set" class="demo">Write</button>
+      </div>
+      <pre id="path-result" class="wire small"></pre>
+    </section>
+
+    <section class="panel">
+      <h2>Events <span class="muted">pushed by post_event</span></h2>
+      <p id="event-status" class="empty">waiting for events…</p>
+      <ul id="events" class="events"></ul>
+    </section>
+
+    <section class="panel">
+      <h2>Wire log <span class="muted">(what crosses window.sky)</span></h2>
+      <pre id="wire" class="wire"></pre>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

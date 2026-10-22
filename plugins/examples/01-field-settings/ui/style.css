@@ -1,0 +1,98 @@
+:root {
+  --bg: #0b1424;
+  --panel: #101c31;
+  --border: #24344f;
+  --text: #e6eefc;
+  --muted: #8fa4c5;
+  --accent: #4da3ff;
+  --danger: #ff7070;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 20px 24px 40px;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.top {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+h1 { margin: 0 0 4px; font-size: 20px; }
+h2 { margin: 0 0 12px; font-size: 15px; }
+.muted { color: var(--muted); font-weight: normal; font-size: 12px; }
+code { color: var(--accent); }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 16px;
+  max-width: 640px;
+}
+
+.form-grid { display: grid; gap: 12px; margin-bottom: 14px; }
+.form-grid label { display: grid; gap: 4px; font-size: 13px; }
+.form-grid input[type="text"],
+.form-grid input[type="number"],
+.form-grid select {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #0a1220;
+  color: var(--text);
+  width: 100%;
+}
+.form-grid label.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+button {
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #17233b;
+  color: var(--text);
+  cursor: pointer;
+}
+button:hover { border-color: var(--muted); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #06101f; font-weight: 600; }
+button.demo { border-color: var(--danger); color: var(--danger); }
+
+.error {
+  margin: 12px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  color: var(--danger);
+  font-size: 13px;
+}
+.hidden { display: none; }
+
+.wire {
+  margin: 0;
+  padding: 10px;
+  max-height: 180px;
+  overflow: auto;
+  background: #0a1220;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: 12px/1.5 ui-monospace, Consolas, monospace;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.wire .line-bad { color: var(--danger); }
+.wire .line-ok { color: var(--text); }

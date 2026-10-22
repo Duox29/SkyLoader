@@ -1,38 +1,50 @@
-TARGET := dist/SkyLoader.exe
-SRC := src/main.cpp src/loader_controller.cpp
-RESOURCE_SCRIPT := resources/skyloader.rc
-RESOURCE_OBJECT := dist/skyloader.res
-BOOTSTRAP_DIR := libraries/SkyBootstrap
-OVERLAY_DIR := libraries/SkyOverlay
+GO ?= go
+ISCC ?= iscc
+ZIG ?= zig
 
-CXX := g++
-WINDRES := windres
-CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -municode
-LDFLAGS := -mwindows -static -static-libgcc -static-libstdc++ -lcomctl32 -lshell32 -lgdi32 -luxtheme -ladvapi32 -lversion -lwinhttp
+GOOS ?= windows
+GOARCH ?= amd64
+WINDOWS_CC := $(ZIG) cc -target x86_64-windows-gnu
+LAUNCHER_LDFLAGS := -s -w -H=windowsgui
+BOOTSTRAP_LDFLAGS := -s -w
 
-.PHONY: all clean bootstrap overlay
+.PHONY: all launcher bootstrap resources test vet fmt clean installer
 
-all: $(TARGET) bootstrap overlay
+all: launcher bootstrap
+
+launcher: resources
+	mkdir -p dist
+	GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0 $(GO) build \
+		-tags "desktop,production" \
+		-trimpath -buildvcs=false \
+		-ldflags="$(LAUNCHER_LDFLAGS)" \
+		-o dist/SkyLoader.exe ./cmd/skyloader
 
 bootstrap:
-	$(MAKE) -C $(BOOTSTRAP_DIR) all
+	mkdir -p dist
+	GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=1 CC="$(WINDOWS_CC)" $(GO) build \
+		-buildmode=c-shared \
+		-trimpath -buildvcs=false \
+		-ldflags="$(BOOTSTRAP_LDFLAGS)" \
+		-o dist/SkyBootstrap.dll ./cmd/skybootstrap
+	rm -f dist/SkyBootstrap.h
 
-overlay:
-	$(MAKE) -C $(OVERLAY_DIR) all
+resources: cmd/skyloader/rsrc_windows_amd64.syso
 
-$(TARGET): $(SRC) $(RESOURCE_OBJECT) | dist
-	$(CXX) $(CXXFLAGS) $(SRC) $(RESOURCE_OBJECT) -o $@ $(LDFLAGS)
+cmd/skyloader/rsrc_windows_amd64.syso: resources/skyloader.ico resources/skyloader.manifest resources/genwinres.go
+	$(GO) run ./resources/genwinres.go
 
-$(RESOURCE_OBJECT): $(RESOURCE_SCRIPT) resources/skyloader.ico | dist
-	$(WINDRES) -i $(RESOURCE_SCRIPT) -O coff -o $@
+test:
+	$(GO) test ./...
 
-dist:
-	mkdir dist
+vet:
+	$(GO) vet ./...
+
+fmt:
+	gofmt -w cmd internal resources
 
 clean:
-	-del /q dist\SkyLoader.exe
-	-del /q dist\skyloader.res
-	-del /q dist\SkyBootstrap-vulkan-layer.json
-	-del /q dist\SkyOverlay.dll
-	-$(MAKE) -C $(BOOTSTRAP_DIR) clean
-	-$(MAKE) -C $(OVERLAY_DIR) clean
+	rm -rf dist cmd/skyloader/rsrc_windows_amd64.syso
+
+installer: all
+	$(ISCC) installer/SkyLoader.iss
