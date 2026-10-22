@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>SkyLoader</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22"><path d="M12 2.5 14.9 9l6.6.6-5 4.3 1.5 6.5L12 16.8l-6 3.6 1.5-6.5-5-4.3L9.1 9 12 2.5Z" fill="currentColor"/></svg>
+        </div>
+        <div>
+          <h1>SkyLoader</h1>
+          <span class="version" id="version">v0.0.0</span>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button class="btn ghost" id="folderBtn" type="button">Plugins folder</button>
+        <button class="btn ghost" id="updateBtn" type="button">Check updates</button>
+      </div>
+    </header>
+
+    <div class="banner hidden" id="updateBanner">
+      <div class="banner-copy">
+        <strong id="updateTitle">Update available</strong>
+        <span id="updateText"></span>
+      </div>
+      <div class="banner-actions">
+        <button class="btn primary small" id="updateAction" type="button">Open update</button>
+        <button class="btn ghost small" id="updateDismiss" type="button">Later</button>
+      </div>
+    </div>
+
+    <main class="layout">
+      <section class="card plugins-card">
+        <div class="card-head">
+          <div>
+            <h2>Plugins</h2>
+            <p id="pluginSummary" class="muted">No plugins installed.</p>
+          </div>
+          <button class="btn primary" id="addBtn" type="button">Add plugins</button>
+        </div>
+        <div class="plugin-list" id="pluginList"></div>
+        <div class="empty hidden" id="emptyState">
+          <div class="empty-icon">◇</div>
+          <h3>No plugins yet</h3>
+          <p>Drop a plugin <code>.dll</code>, a <code>.zip</code> bundle, or a bundle folder here. Plugin bundle UIs open inside this window.</p>
+        </div>
+        <div class="drop-hint">Tip: drop <code>.dll</code>, <code>.zip</code>, or bundle folders anywhere in this window.</div>
+      </section>
+
+      <aside class="side">
+        <section class="card launch-card">
+          <div class="status-row">
+            <span class="dot" id="statusDot"></span>
+            <span id="gameStatus">Sky is not running</span>
+          </div>
+
+          <label class="field-label" for="gamePath">Sky executable</label>
+          <div class="path-row">
+            <input id="gamePath" type="text" spellcheck="false" autocomplete="off" />
+            <button class="btn" id="browseBtn" type="button">Browse</button>
+          </div>
+
+          <div class="bootstrap-block">
+            <div class="bootstrap-line">
+              <span class="muted small">Bootstrap</span>
+              <span id="bootstrapState" class="small">SkyBootstrap.dll</span>
+            </div>
+            <div class="path-row compact">
+              <input id="bootstrapPath" type="text" spellcheck="false" autocomplete="off" />
+              <button class="btn small" id="browseBootstrapBtn" type="button">Change</button>
+            </div>
+          </div>
+
+          <label class="switch-row">
+            <input id="autoInject" type="checkbox" />
+            <span class="switch" aria-hidden="true"></span>
+            <span class="switch-copy">
+              <strong>Auto-inject</strong>
+              <small>Load enabled plugins when Sky starts.</small>
+            </span>
+          </label>
+
+          <div class="launch-actions">
+            <button class="btn launch" id="launchBtn" type="button">Launch Sky</button>
+            <button class="btn hidden" id="injectBtn" type="button">Inject now</button>
+          </div>
+          <p class="status-text" id="statusText">Ready.</p>
+        </section>
+
+        <section class="card meta-card">
+          <h3>Runtime</h3>
+          <dl>
+            <div><dt>Plugins</dt><dd id="pluginsDir">—</dd></div>
+            <div><dt>Config</dt><dd id="configPath">—</dd></div>
+          </dl>
+          <div class="meta-actions">
+            <button class="link" id="openAppFolder" type="button">Open data folder</button>
+            <button class="link" id="openLogs" type="button">Open logs</button>
+            <button class="link" id="openPluginsFolder" type="button">Managed plugins</button>
+          </div>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <div class="modal hidden" id="modal" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <h3 id="modalTitle">Confirm</h3>
+      <p id="modalMessage"></p>
+      <div class="modal-actions">
+        <button class="btn ghost" id="modalCancel" type="button">Cancel</button>
+        <button class="btn primary" id="modalConfirm" type="button">Continue</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="drop-overlay hidden" id="dropOverlay">
+    <div class="drop-card">
+      <div class="drop-glyph">↓</div>
+      <strong>Drop to install</strong>
+      <span>DLL · ZIP bundle · bundle folder</span>
+    </div>
+  </div>
+
+  <div class="ui-layer hidden" id="uiLayer">
+    <header class="ui-head">
+      <div class="ui-title">
+        <span class="plugin-dot"></span>
+        <div>
+          <strong id="uiName">Plugin UI</strong>
+          <small id="uiMeta"></small>
+        </div>
+      </div>
+      <div class="ui-actions">
+        <button class="btn ghost small" id="uiReload" type="button">Reload</button>
+        <button class="btn ghost small" id="uiBrowser" type="button">Open in browser</button>
+        <button class="btn small" id="uiClose" type="button">Close</button>
+      </div>
+    </header>
+    <iframe id="pluginFrame" title="Plugin UI" sandbox="allow-scripts allow-forms allow-popups allow-downloads allow-same-origin"></iframe>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

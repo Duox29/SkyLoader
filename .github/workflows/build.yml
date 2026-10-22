@@ -1,0 +1,65 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CGO_ENABLED: "0"
+  SKYLOADER_CACHE: ${{ github.workspace }}/.cache/skyloader
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Check formatting
+        run: test -z "$(gofmt -l cmd internal tools)"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Vet Windows packages
+        run: GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./internal/... ./cmd/skyloader/...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Cache portable Zig
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.cache/skyloader
+          key: zig-0.13.0-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Build launcher
+        run: go run ./tools/buildlauncher
+
+      - name: Build bootstrap
+        run: go run ./tools/buildbootstrap
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: SkyLoader-${{ runner.os }}-amd64
+          if-no-files-found: error
+          path: |
+            dist/SkyLoader.exe
+            dist/SkyBootstrap.dll

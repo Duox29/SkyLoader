@@ -1,18 +1,15 @@
 # Build outputs
-dist/*.exe
-dist/*.dll
-dist/*.log
-dist/*.res
-dist/*-vulkan-layer.json
-dist/installer/
+/dist/
+/.cache/
+*.syso
+/skyloader
 
-# Local machine configuration
+# Local machine configuration and migration source
 SkyLoader.ini
-dist/SkyLoader.ini
-dist/SkyBootstrap.ini
-dist/SkyOverlay.ini
+config.json
 
 # IDE and editor files
+.idea/
 .vscode/
 .vs/
 *.user
