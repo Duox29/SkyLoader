@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -40,6 +41,57 @@ type UpdateResult struct {
 	AssetURL       string
 	DownloadedPath string
 	Message        string
+}
+
+// compareVersions returns -1 when a is older than b, 0 when they are
+// equivalent, and 1 when a is newer. Numeric segments compare numerically;
+// after those, a pre-release-style label compares lexicographically.
+func compareVersions(a, b string) int {
+	first, firstLabel := parseVersion(a)
+	second, secondLabel := parseVersion(b)
+	for i := 0; i < len(first) || i < len(second); i++ {
+		var x, y uint64
+		if i < len(first) {
+			x = first[i]
+		}
+		if i < len(second) {
+			y = second[i]
+		}
+		if x < y {
+			return -1
+		}
+		if x > y {
+			return 1
+		}
+	}
+	return strings.Compare(firstLabel, secondLabel)
+}
+
+func parseVersion(version string) ([]uint64, string) {
+	version = strings.TrimSpace(version)
+	if len(version) > 0 && (version[0] == 'v' || version[0] == 'V') {
+		version = version[1:]
+	}
+	var numbers []uint64
+	for i := 0; i < len(version); {
+		character := version[i]
+		switch {
+		case character >= '0' && character <= '9':
+			end := i
+			for end < len(version) && version[end] >= '0' && version[end] <= '9' {
+				end++
+			}
+			number, _ := strconv.ParseUint(version[i:end], 10, 64)
+			numbers = append(numbers, number)
+			i = end
+		case character == '.' || character == '-' || character == '_' ||
+			character == '+' || character == ' ' || character == '\t':
+			i++
+		default:
+			return numbers, strings.ToLower(version[i:])
+		}
+	}
+	return numbers, ""
 }
 
 // checkForUpdates queries the latest GitHub release and downloads a newer installer.
@@ -74,7 +126,10 @@ func checkForUpdates(ctx context.Context, currentVersion, userAgent, downloadDir
 		return result, fmt.Errorf("decode GitHub release: %w", err)
 	}
 	result.LatestVersion = strings.TrimSpace(payload.TagName)
-	result.ReleaseURL = firstNonEmpty(payload.HTMLURL, releasePageURL)
+	result.ReleaseURL = payload.HTMLURL
+	if result.ReleaseURL == "" {
+		result.ReleaseURL = releasePageURL
+	}
 	if result.LatestVersion == "" {
 		return result, errors.New("GitHub release has no version tag")
 	}
@@ -97,8 +152,7 @@ func checkForUpdates(ctx context.Context, currentVersion, userAgent, downloadDir
 		return result, err
 	}
 
-	filename := "SkyLoader-" + safeVersion(result.LatestVersion) + ".exe"
-	destination := filepath.Join(downloadDir, filename)
+	destination := filepath.Join(downloadDir, "SkyLoader-"+safeVersion(result.LatestVersion)+".exe")
 	if err := download(ctx, result.AssetURL, destination, userAgent); err != nil {
 		return result, err
 	}
@@ -107,26 +161,20 @@ func checkForUpdates(ctx context.Context, currentVersion, userAgent, downloadDir
 	return result, nil
 }
 
-// selectAsset prefers an installer, then a SkyLoader executable, then any
-// downloadable .exe.
+// selectAsset prefers an installer, then the first downloadable .exe.
 func selectAsset(assets []Asset) string {
-	var fallback string
+	fallback := ""
 	for _, asset := range assets {
 		url := strings.TrimSpace(asset.BrowserDownloadURL)
 		if url == "" || !strings.HasSuffix(strings.ToLower(url), ".exe") {
 			continue
 		}
+		if fallback == "" {
+			fallback = url
+		}
 		name := strings.ToLower(asset.Name + " " + url)
 		if strings.Contains(name, "setup") || strings.Contains(name, "installer") {
 			return url
-		}
-		if strings.Contains(name, "skyloader") || strings.Contains(name, "sky-loader") || strings.Contains(name, "sky loader") {
-			if fallback == "" {
-				fallback = url
-			}
-		}
-		if fallback == "" {
-			fallback = url
 		}
 	}
 	return fallback
@@ -167,10 +215,7 @@ func download(ctx context.Context, url, destination, userAgent string) error {
 	if written > maxDownload {
 		return errors.New("update download is too large")
 	}
-	if err := os.Rename(tempName, destination); err != nil {
-		return err
-	}
-	return nil
+	return os.Rename(tempName, destination)
 }
 
 func safeVersion(version string) string {
@@ -179,17 +224,15 @@ func safeVersion(version string) string {
 	if version == "" {
 		return "latest"
 	}
-	var builder strings.Builder
-	for _, character := range version {
+	return strings.Map(func(character rune) rune {
 		switch {
 		case character >= '0' && character <= '9',
 			character >= 'a' && character <= 'z',
 			character >= 'A' && character <= 'Z',
 			character == '.', character == '-', character == '_':
-			builder.WriteRune(character)
+			return character
 		default:
-			builder.WriteByte('_')
+			return '_'
 		}
-	}
-	return builder.String()
+	}, version)
 }

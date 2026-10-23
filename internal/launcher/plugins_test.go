@@ -1,0 +1,183 @@
+//go:build windows
+
+package launcher
+
+import (
+	"archive/zip"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func writeBundle(t *testing.T, root, id, version string) {
+	t.Helper()
+	writeFile(t, filepath.Join(root, "plugin.json"),
+		`{"id":"`+id+`","name":"Test Plugin","version":"`+version+`","author":"Tester","dll":"test.dll","ui":"ui"}`)
+	writeFile(t, filepath.Join(root, "test.dll"), "not a real pe file")
+	writeFile(t, filepath.Join(root, "ui", "index.html"), "<html></html>")
+}
+
+func TestImportFolderBundle(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(t.TempDir(), "Example.Plugin")
+	writeBundle(t, source, "example.plugin", "1.0.0")
+
+	result := importPlugin(root, source, false)
+	if result.Action != ActionAdded || result.ID != "example.plugin" {
+		t.Fatalf("first import = %+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(root, "example.plugin", "ui", "index.html")); err != nil {
+		t.Fatalf("UI was not installed: %v", err)
+	}
+
+	source = filepath.Join(t.TempDir(), "Example.Plugin")
+	writeBundle(t, source, "example.plugin", "1.2.0")
+	if result = importPlugin(root, source, false); result.Action != ActionUpdated {
+		t.Fatalf("newer import = %+v, want updated", result)
+	}
+
+	source = filepath.Join(t.TempDir(), "Example.Plugin")
+	writeBundle(t, source, "example.plugin", "1.1.0")
+	if result = importPlugin(root, source, false); result.Action != ActionUnchanged {
+		t.Fatalf("older import = %+v, want unchanged", result)
+	}
+}
+
+func TestImportDLLWithSidecarUI(t *testing.T) {
+	root := t.TempDir()
+	sourceDir := filepath.Join(t.TempDir(), "Legacy Mod")
+	writeFile(t, filepath.Join(sourceDir, "Legacy Mod.dll"), "dll")
+	writeFile(t, filepath.Join(sourceDir, "Legacy Mod.ui", "index.html"), "<html></html>")
+	source := filepath.Join(sourceDir, "Legacy Mod.dll")
+
+	result := importPlugin(root, source, false)
+	if result.Action != ActionAdded {
+		t.Fatalf("import = %+v, want added", result)
+	}
+	bundle, err := loadBundle(filepath.Join(root, DirectoryName(FromPath(source))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.UIDir == "" || bundle.UIEntry == "" {
+		t.Fatalf("sidecar UI was not associated with the DLL: %+v", bundle)
+	}
+}
+
+func TestZipSlipRejected(t *testing.T) {
+	destination := t.TempDir()
+	zipPath := filepath.Join(t.TempDir(), "evil.zip")
+	file, err := os.Create(zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(file)
+	entry, err := writer.Create("../escape.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.Write([]byte("nope")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractZip(zipPath, destination); err == nil {
+		t.Fatal("expected zip slip to be rejected")
+	}
+}
+
+func TestSafeRelative(t *testing.T) {
+	for _, unsafe := range []string{"../escape", `C:\escape`, "C:/escape", `\\server\share`, "/etc/passwd", "a/../../b"} {
+		if _, err := safeRelative(unsafe); err == nil {
+			t.Fatalf("expected %q to be rejected", unsafe)
+		}
+	}
+	if got, err := safeRelative("ui/index.html"); err != nil || got != "ui/index.html" {
+		t.Fatalf("safeRelative = %q, %v", got, err)
+	}
+}
+
+func TestCanonical(t *testing.T) {
+	tests := map[string]string{
+		"Example.Author.Mod": "example.author.mod",
+		"my_mod-2":           "my_mod-2",
+		".":                  "",
+		"..":                 "",
+		"...":                "",
+		"bad id":             "",
+		"":                   "",
+	}
+	for input, want := range tests {
+		if got := Canonical(input); got != want {
+			t.Fatalf("Canonical(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestFromPath(t *testing.T) {
+	tests := map[string]string{
+		`C:\mods\My-Mod.dll`:     "my-mod.dll",
+		`C:\mods\My-Mod.14.dll`:  "my-mod.dll",
+		`C:\mods\My-Mod.1.4.dll`: "my-mod.1.4.dll",
+	}
+	for input, want := range tests {
+		if got := FromPath(input); got != want {
+			t.Fatalf("FromPath(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestDirectoryNameIsStableAndSafe(t *testing.T) {
+	if got := DirectoryName("example.author.mod"); got != "example.author.mod" {
+		t.Fatalf("unexpected safe id: %q", got)
+	}
+	if got := DirectoryName("My Mod"); got == "" || got == "my mod" {
+		t.Fatalf("unsafe directory name: %q", got)
+	}
+	if DirectoryName("My Mod") != DirectoryName("My Mod") {
+		t.Fatal("directory name is not deterministic")
+	}
+}
+
+func TestDirectoryNameRejectsWindowsSpecialNames(t *testing.T) {
+	for _, id := range []string{".", "..", "...", ".hidden.", "CON", "con.txt", "NUL", "COM1", "LPT9"} {
+		name := DirectoryName(id)
+		if name == "" || name == "." || name == ".." || strings.HasSuffix(name, ".") {
+			t.Fatalf("DirectoryName(%q) = %q", id, name)
+		}
+		if name == strings.ToLower(id) {
+			t.Fatalf("DirectoryName(%q) returned an unsafe name unchanged", id)
+		}
+	}
+}
+
+func TestInfoFromTablesAllowsMissingVersion(t *testing.T) {
+	info, err := infoFromTables([]versionTable{
+		{"ProductName": "No identity"},
+		{"SkyPluginId": "example.author.plugin", "PluginName": "Example Plugin"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.ID != "example.author.plugin" || info.Version != "" || info.Name != "Example Plugin" {
+		t.Fatalf("info = %+v", info)
+	}
+}
+
+func TestInfoFromTablesRequiresID(t *testing.T) {
+	if _, err := infoFromTables([]versionTable{{"Version": "1.0.0"}}); err == nil {
+		t.Fatal("expected missing SkyPluginId to fail")
+	}
+}
+
+func TestReadVersionInfoRejectsNonPE(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "not-a-pe.dll")
+	writeFile(t, path, "not a PE file")
+	if _, err := readVersionInfo(path); err == nil {
+		t.Fatal("expected a file without VERSIONINFO to fail")
+	}
+}

@@ -52,10 +52,7 @@ func PluginDir(exeDir string) string  { return filepath.Join(AppDir(exeDir), leg
 func LogsDir(exeDir string) string    { return filepath.Join(AppDir(exeDir), "logs") }
 func UpdatesDir(exeDir string) string { return filepath.Join(AppDir(exeDir), "updates") }
 func LogPath(exeDir string) string    { return filepath.Join(LogsDir(exeDir), "SkyLoader.log") }
-
-func ConfigPath(exeDir string) string {
-	return filepath.Join(AppDir(exeDir), configFileName)
-}
+func ConfigPath(exeDir string) string { return filepath.Join(AppDir(exeDir), configFileName) }
 
 // Defaults returns a configuration with sane paths for a fresh install.
 func Defaults(exeDir string) Config {
@@ -85,8 +82,7 @@ func LoadConfig(exeDir string) (Config, string, error) {
 	case errors.Is(err, os.ErrNotExist):
 		legacy := filepath.Join(exeDir, legacyININame)
 		if legacyData, legacyErr := os.ReadFile(legacy); legacyErr == nil {
-			migrated, migrationErr := MigrateINI(string(legacyData), exeDir)
-			if migrationErr == nil {
+			if migrated, migrationErr := MigrateINI(string(legacyData), exeDir); migrationErr == nil {
 				cfg = migrated
 				status = "Imported settings from SkyLoader.ini."
 			}
@@ -185,9 +181,7 @@ func (c Config) Save(path string) error {
 func ParseINI(data string) map[string]map[string]string {
 	sections := map[string]map[string]string{}
 	current := ""
-
-	lines := strings.Split(strings.ReplaceAll(data, "\r\n", "\n"), "\n")
-	for _, line := range lines {
+	for _, line := range strings.Split(strings.ReplaceAll(data, "\r\n", "\n"), "\n") {
 		line = strings.TrimSpace(strings.TrimPrefix(line, "\ufeff"))
 		if line == "" || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "#") {
 			continue
@@ -236,10 +230,7 @@ func MigrateINI(data, exeDir string) (Config, error) {
 	}
 	for i := 0; i < count; i++ {
 		path := dlls["dll"+strconv.Itoa(i)]
-		if path == "" {
-			continue
-		}
-		if strings.EqualFold(windowsBaseName(path), "SkyOverlay.dll") {
+		if path == "" || strings.EqualFold(windowsBaseName(path), "SkyOverlay.dll") {
 			continue
 		}
 		enabled := dlls["dllenabled"+strconv.Itoa(i)] != "0"

@@ -4,11 +4,9 @@ package main
 
 import (
 	"context"
-	"errors"
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -243,13 +241,6 @@ func (a *App) OpenUpdate() error {
 // OpenReleasePage opens the GitHub releases page.
 func (a *App) OpenReleasePage() error {
 	return a.launcher.OpenURL("https://github.com/HerokeyVN/SkyLoader/releases")
-}
-
-func (a *App) revealPath(path string) error {
-	if strings.TrimSpace(path) == "" {
-		return errors.New("path is empty")
-	}
-	return a.launcher.OpenPath(path)
 }
 
 func existingDirectory(path string) string {

@@ -1,5 +1,7 @@
 //go:build windows
 
+// Package launcher owns SkyLoader's configuration, managed plugin store,
+// game-process watcher, plugin injection, local plugin UI bridge, and updates.
 package launcher
 
 import (
@@ -8,13 +10,88 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
+	"path"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 
 	"github.com/HerokeyVN/SkyLoader/internal/uiserver"
 )
+
+const (
+	// Version is the user-visible SkyLoader release version.
+	Version = "0.2.0"
+	// AppName is the product name used in windows and logs.
+	AppName = "SkyLoader"
+)
+
+// PluginView is the frontend-safe description of one registered plugin.
+type PluginView struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Version     string `json:"version"`
+	Author      string `json:"author"`
+	Description string `json:"description"`
+	Path        string `json:"path"`
+	UIPath      string `json:"uiPath,omitempty"`
+	HasUI       bool   `json:"hasUI"`
+	Enabled     bool   `json:"enabled"`
+	Managed     bool   `json:"managed"`
+	Missing     bool   `json:"missing"`
+	Loaded      bool   `json:"loaded"`
+}
+
+// UpdateView describes the last update check.
+type UpdateView struct {
+	Checking       bool   `json:"checking"`
+	Available      bool   `json:"available"`
+	LatestVersion  string `json:"latestVersion,omitempty"`
+	ReleaseURL     string `json:"releaseURL,omitempty"`
+	DownloadedPath string `json:"downloadedPath,omitempty"`
+	Message        string `json:"message,omitempty"`
+}
+
+// State is the complete snapshot sent to the frontend.
+type State struct {
+	Version        string       `json:"version"`
+	AppDir         string       `json:"appDir"`
+	ConfigPath     string       `json:"configPath"`
+	PluginsDir     string       `json:"pluginsDir"`
+	LogPath        string       `json:"logPath"`
+	GamePath       string       `json:"gamePath"`
+	GamePathValid  bool         `json:"gamePathValid"`
+	BootstrapPath  string       `json:"bootstrapPath"`
+	BootstrapValid bool         `json:"bootstrapValid"`
+	AutoInject     bool         `json:"autoInject"`
+	GameRunning    bool         `json:"gameRunning"`
+	GamePID        uint32       `json:"gamePID,omitempty"`
+	Injected       bool         `json:"injected"`
+	Plugins        []PluginView `json:"plugins"`
+	Update         UpdateView   `json:"update"`
+	Status         string       `json:"status"`
+}
+
+// ImportItem is one outcome in an import report.
+type ImportItem struct {
+	Source  string `json:"source"`
+	Action  string `json:"action"`
+	ID      string `json:"id,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Version string `json:"version,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+// ImportReport tells the frontend what happened and which paths need a
+// confirmation before they can be retried with force=true.
+type ImportReport struct {
+	Paths        []string     `json:"paths"`
+	Force        bool         `json:"force"`
+	Items        []ImportItem `json:"items"`
+	Message      string       `json:"message"`
+	NeedsConfirm bool         `json:"needsConfirm"`
+}
 
 // Launcher is the launcher's application core. All exported methods are safe
 // for concurrent use by the Wails frontend and the local UI server.
@@ -25,7 +102,6 @@ type Launcher struct {
 	exeDir   string
 	version  string
 	cfg      Config
-	store    *Store
 	server   *uiserver.Server
 	client   *uiserver.Client
 	logger   *log.Logger
@@ -73,20 +149,19 @@ func New(exeDir, version string, logger *log.Logger) (*Launcher, error) {
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
-	absolute, err := filepath.Abs(exeDir)
-	if err == nil {
+	if absolute, err := filepath.Abs(exeDir); err == nil {
 		exeDir = absolute
 	}
 
-	cfg, migrationStatus, loadErr := LoadConfig(exeDir)
-	if loadErr != nil {
+	cfg, status, err := LoadConfig(exeDir)
+	if err != nil {
 		cfg = Defaults(exeDir)
-		migrationStatus = "Could not read settings: " + loadErr.Error()
-		logger.Printf("%s", migrationStatus)
+		status = "Could not read settings: " + err.Error()
+		logger.Printf("%s", status)
 	}
 
-	store, err := NewStore(PluginDir(exeDir))
-	if err != nil {
+	storeRoot := PluginDir(exeDir)
+	if err := os.MkdirAll(storeRoot, 0o755); err != nil {
 		return nil, fmt.Errorf("create plugin store: %w", err)
 	}
 
@@ -94,17 +169,16 @@ func New(exeDir, version string, logger *log.Logger) (*Launcher, error) {
 		exeDir:    exeDir,
 		version:   version,
 		cfg:       cfg,
-		store:     store,
-		storeRoot: filepath.Clean(store.Root),
+		storeRoot: filepath.Clean(storeRoot),
 		client:    uiserver.NewClient(),
 		logger:    logger,
 		plugins:   map[string]*pluginRecord{},
 		loaded:    map[string]bool{},
-		status:    migrationStatus,
+		status:    status,
 		stop:      make(chan struct{}),
 		done:      make(chan struct{}),
 	}
-	l.rebuildRecordsLocked()
+	l.rebuildRecords()
 	if l.status == "" {
 		l.status = "Ready. Start Sky from Steam or click Launch Sky."
 	}
@@ -129,7 +203,6 @@ func (l *Launcher) Close() error {
 }
 
 // SetEmitter installs the event callback used to push state to the frontend.
-// It may be called before or after New; no events are emitted until it is set.
 func (l *Launcher) SetEmitter(emit func(name string, data ...any)) {
 	l.mu.Lock()
 	l.emit = emit
@@ -140,10 +213,9 @@ func (l *Launcher) notify() {
 	l.mu.RLock()
 	emit := l.emit
 	l.mu.RUnlock()
-	if emit == nil {
-		return
+	if emit != nil {
+		emit("state", l.State())
 	}
-	emit("state", l.State())
 }
 
 // Notice sends a transient frontend notification.
@@ -211,14 +283,7 @@ func (l *Launcher) SetGamePath(path string) error {
 	if path == "" {
 		return errors.New("Sky executable path is empty")
 	}
-	l.mu.Lock()
-	l.cfg.GamePath = path
-	l.mu.Unlock()
-	if err := l.persist(); err != nil {
-		return err
-	}
-	l.setStatus("Sky executable path updated.")
-	return nil
+	return l.saveConfig("Sky executable path updated.", func(cfg *Config) { cfg.GamePath = path })
 }
 
 // SetBootstrapPath normalizes and persists a new SkyBootstrap.dll path.
@@ -230,29 +295,20 @@ func (l *Launcher) SetBootstrapPath(path string) error {
 	if !isRegularFile(path) {
 		return errors.New("the selected SkyBootstrap.dll does not exist")
 	}
-	l.mu.Lock()
-	l.cfg.BootstrapPath = path
-	l.mu.Unlock()
-	if err := l.persist(); err != nil {
-		return err
-	}
-	l.setStatus("SkyBootstrap.dll path updated.")
-	return nil
+	return l.saveConfig("SkyBootstrap.dll path updated.", func(cfg *Config) { cfg.BootstrapPath = path })
 }
 
 // SetAutoInject controls automatic loading when Sky.exe appears.
 func (l *Launcher) SetAutoInject(enabled bool) error {
-	l.mu.Lock()
-	l.cfg.AutoInject = enabled
-	l.mu.Unlock()
-	if err := l.persist(); err != nil {
+	status := "Automatic injection disabled."
+	if enabled {
+		status = "Automatic injection enabled."
+	}
+	if err := l.saveConfig(status, func(cfg *Config) { cfg.AutoInject = enabled }); err != nil {
 		return err
 	}
 	if enabled {
-		l.setStatus("Automatic injection enabled.")
 		l.kickWatcher()
-	} else {
-		l.setStatus("Automatic injection disabled.")
 	}
 	return nil
 }
@@ -321,6 +377,7 @@ func (l *Launcher) OpenURL(url string) error {
 func (l *Launcher) PluginURL(id string) (string, error) {
 	l.mu.RLock()
 	record := l.plugins[strings.ToLower(id)]
+	server := l.server
 	l.mu.RUnlock()
 	if record == nil {
 		return "", errors.New("plugin was not found")
@@ -328,17 +385,15 @@ func (l *Launcher) PluginURL(id string) (string, error) {
 	if record.UIDir == "" || record.UIEntry == "" {
 		return "", errors.New("this plugin does not include a web UI")
 	}
-	if l.server == nil {
+	if server == nil {
 		return "", errors.New("the plugin UI server is not running")
 	}
-	return l.server.PluginURL(record.ID), nil
+	return server.PluginURL(record.ID), nil
 }
 
 // PluginFolder returns the folder containing a plugin's bundle or DLL.
 func (l *Launcher) PluginFolder(id string) (string, error) {
-	l.mu.RLock()
-	record := l.plugins[strings.ToLower(id)]
-	l.mu.RUnlock()
+	record := l.plugin(id)
 	if record == nil {
 		return "", errors.New("plugin was not found")
 	}
@@ -395,11 +450,21 @@ func (l *Launcher) OpenUpdate() error {
 	return l.OpenURL(url)
 }
 
-// GamePath returns the configured Sky.exe path.
-func (l *Launcher) GamePath() string {
+func (l *Launcher) plugin(id string) *pluginRecord {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	return l.cfg.GamePath
+	return l.plugins[strings.ToLower(id)]
+}
+
+func (l *Launcher) saveConfig(status string, edit func(*Config)) error {
+	l.mu.Lock()
+	edit(&l.cfg)
+	l.mu.Unlock()
+	if err := l.persist(); err != nil {
+		return err
+	}
+	l.setStatus(status)
+	return nil
 }
 
 func (l *Launcher) setStatus(message string) {
@@ -411,10 +476,6 @@ func (l *Launcher) setStatus(message string) {
 	l.mu.Unlock()
 	l.logger.Printf("%s", message)
 	l.notify()
-}
-
-func (l *Launcher) emitNotice(kind, message string) {
-	l.Notice(kind, message)
 }
 
 func (l *Launcher) persist() error {
@@ -444,13 +505,12 @@ func (l *Launcher) persist() error {
 	return nil
 }
 
-// rebuildRecordsLocked is called during construction while the launcher is not
+// rebuildRecords is called during construction while the launcher is not
 // shared yet.
-func (l *Launcher) rebuildRecordsLocked() {
+func (l *Launcher) rebuildRecords() {
 	enabledByPath := make(map[string]bool, len(l.cfg.Plugins))
 	for _, entry := range l.cfg.Plugins {
-		path := normalizePath(entry.Path)
-		if path != "" {
+		if path := normalizePath(entry.Path); path != "" {
 			enabledByPath[strings.ToLower(path)] = entry.Enabled
 		}
 	}
@@ -458,44 +518,19 @@ func (l *Launcher) rebuildRecordsLocked() {
 	l.plugins = map[string]*pluginRecord{}
 	l.order = nil
 
-	add := func(record *pluginRecord) {
-		key := strings.ToLower(record.ID)
-		if existing := l.plugins[key]; existing != nil {
-			l.logger.Printf("ignoring duplicate plugin id %q at %s", record.ID, record.DLLPath)
-			return
-		}
-		l.plugins[key] = record
-		l.order = append(l.order, key)
-	}
-
 	managedDLLs := map[string]bool{}
-	for _, bundle := range l.store.Scan() {
-		record := &pluginRecord{
-			ID:          bundle.ID,
-			Name:        firstNonEmpty(bundle.Name, DisplayName(bundle.DLLPath)),
-			Version:     bundle.Version,
-			Author:      bundle.Author,
-			Description: bundle.Description,
-			DLLPath:     bundle.DLLPath,
-			BundleRoot:  bundle.Root,
-			UIDir:       bundle.UIDir,
-			UIEntry:     bundle.UIEntry,
-			Enabled:     true,
-			Managed:     true,
-		}
-		if enabled, ok := enabledByPath[strings.ToLower(bundle.DLLPath)]; ok {
+	for _, record := range scanBundles(l.storeRoot) {
+		if enabled, ok := enabledByPath[strings.ToLower(record.DLLPath)]; ok {
 			record.Enabled = enabled
 		}
-		managedDLLs[strings.ToLower(bundle.DLLPath)] = true
-		add(record)
+		record.Managed = true
+		managedDLLs[strings.ToLower(record.DLLPath)] = true
+		l.addRecord(record)
 	}
 
 	for _, entry := range l.cfg.Plugins {
 		path := normalizePath(entry.Path)
-		if path == "" {
-			continue
-		}
-		if managedDLLs[strings.ToLower(path)] {
+		if path == "" || managedDLLs[strings.ToLower(path)] {
 			continue
 		}
 		if !isRegularFile(path) {
@@ -507,53 +542,35 @@ func (l *Launcher) rebuildRecordsLocked() {
 		if record.Name == "" {
 			record.Name = DisplayName(path)
 		}
-		add(record)
+		l.addRecord(record)
 	}
+	sortPluginOrder(l.order, l.plugins)
+}
 
-	sort.SliceStable(l.order, func(i, j int) bool {
-		first := l.plugins[l.order[i]]
-		second := l.plugins[l.order[j]]
-		firstKey := strings.ToLower(firstNonEmpty(first.Name, first.ID))
-		secondKey := strings.ToLower(firstNonEmpty(second.Name, second.ID))
-		if firstKey == secondKey {
-			return strings.ToLower(first.ID) < strings.ToLower(second.ID)
+func (l *Launcher) addRecord(record *pluginRecord) {
+	key := strings.ToLower(record.ID)
+	if l.plugins[key] != nil {
+		l.logger.Printf("ignoring duplicate plugin id %q at %s", record.ID, record.DLLPath)
+		return
+	}
+	l.plugins[key] = record
+	l.order = append(l.order, key)
+}
+
+func sortPluginOrder(order []string, plugins map[string]*pluginRecord) {
+	name := func(id string) string {
+		record := plugins[id]
+		if record == nil {
+			return ""
 		}
-		return firstKey < secondKey
+		return strings.ToLower(firstNonEmpty(record.Name, record.ID))
+	}
+	slices.SortStableFunc(order, func(a, b string) int {
+		if compared := strings.Compare(name(a), name(b)); compared != 0 {
+			return compared
+		}
+		return strings.Compare(strings.ToLower(plugins[a].ID), strings.ToLower(plugins[b].ID))
 	})
-}
-
-func recordForDLL(path string) *pluginRecord {
-	record := &pluginRecord{
-		ID:      FromPath(path),
-		DLLPath: path,
-		Enabled: true,
-	}
-	if bundle, ok := LoadForDLL(path); ok {
-		record.ID = bundle.ID
-		record.Name = bundle.Name
-		record.Version = bundle.Version
-		record.Author = bundle.Author
-		record.Description = bundle.Description
-		record.BundleRoot = bundle.Root
-		record.UIDir = bundle.UIDir
-		record.UIEntry = bundle.UIEntry
-		return record
-	}
-	if info, err := readVersionInfo(path); err == nil {
-		record.ID = info.ID
-		record.Name = info.Name
-		record.Version = info.Version
-		record.Author = info.Author
-		record.Description = info.Description
-	}
-	record.UIDir, record.UIEntry = FindUI(path)
-	return record
-}
-
-func (l *Launcher) record(id string) *pluginRecord {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return l.plugins[strings.ToLower(id)]
 }
 
 func (l *Launcher) setLoaded(paths []string) {
@@ -575,16 +592,45 @@ func (l *Launcher) refreshLoaded() {
 	l.notify()
 }
 
-func (l *Launcher) isInjected() bool {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return l.gameRunning && l.injectedPID == l.running.PID
-}
-
 func (l *Launcher) kickWatcher() {
 	select {
 	case <-l.stop:
 	default:
 		go l.pollProcess()
 	}
+}
+
+// NewFileLogger opens path for appending and returns a logger plus its close
+// function.
+func NewFileLogger(path string) (*log.Logger, func(), error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, nil, err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, nil, err
+	}
+	logger := log.New(io.MultiWriter(file, os.Stderr), "[SkyLoader] ",
+		log.LstdFlags|log.Lmicroseconds)
+	return logger, func() { _ = file.Close() }, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+// windowsBaseName returns the final element of a Windows or POSIX path. Plugin
+// paths are Windows paths even when tests run on another operating system.
+func windowsBaseName(filePath string) string {
+	return path.Base(strings.ReplaceAll(filePath, `\`, "/"))
+}
+
+func isRegularFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/options/windows"
+	win32 "golang.org/x/sys/windows"
 )
 
 //go:embed all:web
@@ -81,4 +82,10 @@ func executableDir() string {
 		return "."
 	}
 	return filepath.Dir(executable)
+}
+
+func showError(title, message string) {
+	titlePtr, _ := win32.UTF16PtrFromString(title)
+	messagePtr, _ := win32.UTF16PtrFromString(message)
+	_, _ = win32.MessageBox(0, messagePtr, titlePtr, win32.MB_OK|win32.MB_ICONERROR)
 }

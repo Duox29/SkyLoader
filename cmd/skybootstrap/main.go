@@ -1,9 +1,15 @@
-//go:build windows
+//go:build windows && cgo
 
 // Command skybootstrap builds SkyBootstrap.dll, the in-game host injected into
 // Sky.exe. It owns the named-pipe server, plugin DLL lifecycle, ABI callbacks,
 // and per-plugin UI event queues.
 package main
+
+/*
+#include <stdint.h>
+#include <wchar.h>
+*/
+import "C"
 
 import (
 	"encoding/base64"
@@ -170,16 +176,23 @@ func postEventTrampoline(context uintptr, message *byte) uintptr {
 	return 0
 }
 
+func cleanPluginPath(rawPath string) (path, key string, err error) {
+	path, err = filepath.Abs(strings.TrimSpace(rawPath))
+	if err != nil {
+		return "", "", err
+	}
+	path = filepath.Clean(path)
+	return path, strings.ToLower(path), nil
+}
+
 func (h *host) loadPlugin(rawPath string) error {
-	path, err := filepath.Abs(strings.TrimSpace(rawPath))
+	path, key, err := cleanPluginPath(rawPath)
 	if err != nil {
 		return err
 	}
-	path = filepath.Clean(path)
 	if info, err := os.Stat(path); err != nil || info.IsDir() {
 		return fmt.Errorf("plugin not found: %s", path)
 	}
-	key := strings.ToLower(path)
 
 	h.loadMu.Lock()
 	defer h.loadMu.Unlock()
@@ -245,12 +258,10 @@ func (h *host) loadPlugin(rawPath string) error {
 }
 
 func (h *host) unloadPlugin(rawPath string) error {
-	path, err := filepath.Abs(strings.TrimSpace(rawPath))
+	path, key, err := cleanPluginPath(rawPath)
 	if err != nil {
 		return err
 	}
-	path = filepath.Clean(path)
-	key := strings.ToLower(path)
 
 	h.loadMu.Lock()
 	defer h.loadMu.Unlock()
@@ -326,11 +337,10 @@ func (h *host) listPlugins() []string {
 }
 
 func (h *host) uiMessageFor(rawPath string, payload []byte) ([]byte, error) {
-	path, err := filepath.Abs(strings.TrimSpace(rawPath))
+	_, key, err := cleanPluginPath(rawPath)
 	if err != nil {
 		return nil, err
 	}
-	key := strings.ToLower(filepath.Clean(path))
 
 	// Hold the read lock until callMu is held. unloadPlugin needs the write
 	// lock before it can free the DLL, so the module cannot disappear between
@@ -399,11 +409,10 @@ func (h *host) postEvent(context uintptr, message string) bool {
 }
 
 func (h *host) pollEvents(rawPath string) []byte {
-	path, err := filepath.Abs(strings.TrimSpace(rawPath))
+	_, key, err := cleanPluginPath(rawPath)
 	if err != nil {
 		return []byte("[]")
 	}
-	key := strings.ToLower(filepath.Clean(path))
 
 	h.mu.RLock()
 	plugin := h.plugins[key]
@@ -549,6 +558,55 @@ func oneLine(message string) string {
 		message = message[:400]
 	}
 	return strings.TrimSpace(message)
+}
+
+func init() {
+	// c-shared libraries do not call main, so start the host during package
+	// initialization. startHost only spawns the pipe loop; DllMain returns at
+	// once.
+	startHost()
+}
+
+// The exported functions below are the stable C entry points used by native
+// plugins and external tools. The named-pipe server is started when the DLL
+// loads; these functions are a secondary interface.
+
+//export SkyBootstrapStart
+func SkyBootstrapStart() C.int {
+	startHost()
+	return 1
+}
+
+//export SkyBootstrapLoadPluginW
+func SkyBootstrapLoadPluginW(path *C.wchar_t) C.int {
+	if path == nil {
+		return 0
+	}
+	if ok, err := loadPlugin(windows.UTF16PtrToString((*uint16)(unsafe.Pointer(path)))); err != nil || !ok {
+		return 0
+	}
+	return 1
+}
+
+//export SkyBootstrapUnloadPluginW
+func SkyBootstrapUnloadPluginW(path *C.wchar_t) C.int {
+	if path == nil {
+		return 0
+	}
+	if ok, err := unloadPlugin(windows.UTF16PtrToString((*uint16)(unsafe.Pointer(path)))); err != nil || !ok {
+		return 0
+	}
+	return 1
+}
+
+//export SkyBootstrapPluginCount
+func SkyBootstrapPluginCount() C.uint32_t {
+	return C.uint32_t(pluginCount())
+}
+
+//export SkyBootstrapApiVersion
+func SkyBootstrapApiVersion() C.uint32_t {
+	return C.uint32_t(apiVersion)
 }
 
 func main() {}
