@@ -38,16 +38,10 @@ in-app iframe. **Open in browser** uses the same authenticated URL.
 Requirements:
 
 - Go 1.22 or newer
-- No C compiler, MinGW, or Visual Studio
+- Zig 0.13 or newer on `PATH` (used as the cgo compiler for the DLL)
+- No MinGW, Visual Studio, or system C toolchain
 
-```powershell
-go run ./tools/buildlauncher
-go run ./tools/buildbootstrap
-```
-
-Or, with Make:
-
-```powershell
+```bash
 make all
 ```
 
@@ -58,19 +52,22 @@ dist\SkyLoader.exe
 dist\SkyBootstrap.dll
 ```
 
-`buildlauncher` compiles the icon and manifest with pure Go and builds the Wails
-app with `CGO_ENABLED=0`. `buildbootstrap` needs cgo to produce a Windows DLL,
-so it downloads a portable Zig 0.13.0 toolchain and uses `zig cc` as the C
-compiler. The archive is verified against Zig's published SHA-256 checksum and
-cached in the user cache directory. Nothing is installed system-wide.
+`make launcher` compiles the icon and manifest with pure Go and builds the
+Wails app with `CGO_ENABLED=0`. `make bootstrap` builds the c-shared DLL with
+cgo and uses `zig cc -target x86_64-windows-gnu` as the C compiler. Set `ZIG`
+to point at a different Zig executable:
 
-Set `SKYLOADER_ZIG` to use an existing Zig executable, or `SKYLOADER_CACHE` to
-change the download cache. Both tools accept `-root`, `-out`, and `-cache`
-where applicable. Builds work from Windows, Linux, and macOS hosts.
+```bash
+make bootstrap ZIG=C:/tools/zig/zig.exe
+```
+
+`make test`, `make vet`, and `make clean` cover the remaining developer tasks.
+Builds work from Windows, Linux, and macOS hosts when Zig is installed; on
+Windows, run Make from Git Bash or MSYS2 so the shell utilities are available.
 
 Create the installer after building:
 
-```powershell
+```bash
 make installer
 ```
 
@@ -198,17 +195,11 @@ with the plugin loaded. Relative assets work because the server injects a
 
 ```text
 cmd/skyloader/        Wails launcher and embedded frontend
-cmd/skybootstrap/     c-shared DLL entry points
-internal/launcher/    settings, plugin management, watcher, injection
-internal/bootstrap/   in-game pipe server and plugin host
-internal/pluginbundle bundle manifest, zip/folder import, managed store
-internal/uiserver/    authenticated loopback server and JS bridge
-internal/config/      JSON settings and legacy INI migration
-internal/protocol/    launcher <-> bootstrap pipe protocol
-internal/winproc/     Windows process, injection, and path helpers
-tools/                portable build tools
+cmd/skybootstrap/     c-shared DLL entry points and in-game host
+internal/launcher/    settings, plugin store, watcher, injection, updater
+internal/uiserver/    authenticated loopback server, JS bridge, pipe protocol
 libraries/            public plugin ABI header
-resources/            launcher icon and manifest
+resources/            launcher icon, manifest, and resource generator
 installer/            Inno Setup script
 ```
 

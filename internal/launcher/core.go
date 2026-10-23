@@ -1,5 +1,5 @@
-// Package launcher owns SkyLoader's configuration, managed plugin store,
-// game-process watcher, and local plugin UI bridge.
+//go:build windows
+
 package launcher
 
 import (
@@ -13,14 +13,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/HerokeyVN/SkyLoader/internal/config"
-	"github.com/HerokeyVN/SkyLoader/internal/pluginbundle"
-	"github.com/HerokeyVN/SkyLoader/internal/pluginid"
-	"github.com/HerokeyVN/SkyLoader/internal/protocol"
 	"github.com/HerokeyVN/SkyLoader/internal/uiserver"
-	"github.com/HerokeyVN/SkyLoader/internal/updater"
-	"github.com/HerokeyVN/SkyLoader/internal/winproc"
-	"github.com/HerokeyVN/SkyLoader/internal/winver"
 )
 
 // Launcher is the launcher's application core. All exported methods are safe
@@ -31,10 +24,10 @@ type Launcher struct {
 	injectMu sync.Mutex
 	exeDir   string
 	version  string
-	cfg      config.Config
-	store    *pluginbundle.Store
+	cfg      Config
+	store    *Store
 	server   *uiserver.Server
-	client   *protocol.Client
+	client   *uiserver.Client
 	logger   *log.Logger
 
 	emit      func(name string, data ...any)
@@ -46,7 +39,7 @@ type Launcher struct {
 	status  string
 
 	gameRunning  bool
-	running      winproc.Process
+	running      Process
 	injectedPID  uint32
 	attemptedPID uint32
 	pending      bool
@@ -85,14 +78,14 @@ func New(exeDir, version string, logger *log.Logger) (*Launcher, error) {
 		exeDir = absolute
 	}
 
-	cfg, migrationStatus, loadErr := config.Load(exeDir)
+	cfg, migrationStatus, loadErr := LoadConfig(exeDir)
 	if loadErr != nil {
-		cfg = config.Defaults(exeDir)
+		cfg = Defaults(exeDir)
 		migrationStatus = "Could not read settings: " + loadErr.Error()
 		logger.Printf("%s", migrationStatus)
 	}
 
-	store, err := pluginbundle.New(config.PluginDir(exeDir))
+	store, err := NewStore(PluginDir(exeDir))
 	if err != nil {
 		return nil, fmt.Errorf("create plugin store: %w", err)
 	}
@@ -103,7 +96,7 @@ func New(exeDir, version string, logger *log.Logger) (*Launcher, error) {
 		cfg:       cfg,
 		store:     store,
 		storeRoot: filepath.Clean(store.Root),
-		client:    protocol.NewClient(),
+		client:    uiserver.NewClient(),
 		logger:    logger,
 		plugins:   map[string]*pluginRecord{},
 		loaded:    map[string]bool{},
@@ -173,14 +166,14 @@ func (l *Launcher) State() State {
 
 	state := State{
 		Version:        l.version,
-		AppDir:         config.AppDir(l.exeDir),
-		ConfigPath:     config.ConfigPath(l.exeDir),
-		PluginsDir:     config.PluginDir(l.exeDir),
-		LogPath:        config.LogPath(l.exeDir),
+		AppDir:         AppDir(l.exeDir),
+		ConfigPath:     ConfigPath(l.exeDir),
+		PluginsDir:     PluginDir(l.exeDir),
+		LogPath:        LogPath(l.exeDir),
 		GamePath:       l.cfg.GamePath,
-		GamePathValid:  winproc.FileExists(l.cfg.GamePath),
+		GamePathValid:  isRegularFile(l.cfg.GamePath),
 		BootstrapPath:  l.cfg.BootstrapPath,
-		BootstrapValid: winproc.FileExists(l.cfg.BootstrapPath),
+		BootstrapValid: isRegularFile(l.cfg.BootstrapPath),
 		AutoInject:     l.cfg.AutoInject,
 		GameRunning:    l.gameRunning,
 		GamePID:        l.running.PID,
@@ -214,7 +207,7 @@ func (l *Launcher) State() State {
 
 // SetGamePath normalizes and persists a new Sky.exe path.
 func (l *Launcher) SetGamePath(path string) error {
-	path = winproc.NormalizePath(path)
+	path = normalizePath(path)
 	if path == "" {
 		return errors.New("Sky executable path is empty")
 	}
@@ -230,11 +223,11 @@ func (l *Launcher) SetGamePath(path string) error {
 
 // SetBootstrapPath normalizes and persists a new SkyBootstrap.dll path.
 func (l *Launcher) SetBootstrapPath(path string) error {
-	path = winproc.NormalizePath(path)
+	path = normalizePath(path)
 	if path == "" {
 		return errors.New("SkyBootstrap.dll path is empty")
 	}
-	if !winproc.FileExists(path) {
+	if !isRegularFile(path) {
 		return errors.New("the selected SkyBootstrap.dll does not exist")
 	}
 	l.mu.Lock()
@@ -270,7 +263,7 @@ func (l *Launcher) Launch() (string, error) {
 	gamePath := l.cfg.GamePath
 	l.mu.RUnlock()
 
-	process, running := winproc.FindProcess("Sky.exe", gamePath)
+	process, running := findProcess("Sky.exe", gamePath)
 	if running {
 		l.mu.Lock()
 		l.pending = true
@@ -279,7 +272,7 @@ func (l *Launcher) Launch() (string, error) {
 		return "Sky.exe is already running; loading SkyBootstrap.", nil
 	}
 
-	if err := winproc.OpenURL("steam://run/2325290"); err != nil {
+	if err := openURL("steam://run/2325290"); err != nil {
 		return "", fmt.Errorf("could not open Steam: %w", err)
 	}
 	l.mu.Lock()
@@ -295,7 +288,7 @@ func (l *Launcher) Inject() error {
 	gamePath := l.cfg.GamePath
 	l.mu.RUnlock()
 
-	process, running := winproc.FindProcess("Sky.exe", gamePath)
+	process, running := findProcess("Sky.exe", gamePath)
 	if !running {
 		return errors.New("Sky.exe is not running")
 	}
@@ -311,7 +304,7 @@ func (l *Launcher) OpenPath(path string) error {
 	if strings.TrimSpace(path) == "" {
 		return errors.New("path is empty")
 	}
-	return winproc.OpenPath(path)
+	return openPath(path)
 }
 
 // OpenURL opens a validated http(s) URL.
@@ -321,7 +314,7 @@ func (l *Launcher) OpenURL(url string) error {
 		!strings.HasPrefix(strings.ToLower(url), "https://") {
 		return errors.New("only http and https links are allowed")
 	}
-	return winproc.OpenURL(url)
+	return openURL(url)
 }
 
 // PluginURL returns the authenticated local URL for a plugin's UI.
@@ -368,7 +361,7 @@ func (l *Launcher) CheckUpdates(ctx context.Context) (UpdateView, error) {
 	l.mu.Unlock()
 	l.notify()
 
-	result, err := updater.Check(ctx, l.version, "SkyLoader/"+l.version, config.UpdatesDir(l.exeDir))
+	result, err := checkForUpdates(ctx, l.version, "SkyLoader/"+l.version, UpdatesDir(l.exeDir))
 
 	l.mu.Lock()
 	l.update = UpdateView{
@@ -392,8 +385,8 @@ func (l *Launcher) OpenUpdate() error {
 	l.mu.RLock()
 	view := l.update
 	l.mu.RUnlock()
-	if view.DownloadedPath != "" && winproc.FileExists(view.DownloadedPath) {
-		return winproc.OpenPath(view.DownloadedPath)
+	if view.DownloadedPath != "" && isRegularFile(view.DownloadedPath) {
+		return openPath(view.DownloadedPath)
 	}
 	url := view.ReleaseURL
 	if url == "" {
@@ -430,13 +423,13 @@ func (l *Launcher) persist() error {
 
 	l.mu.RLock()
 	cfg := l.cfg
-	entries := make([]config.PluginEntry, 0, len(l.order))
+	entries := make([]PluginEntry, 0, len(l.order))
 	for _, key := range l.order {
 		record := l.plugins[key]
 		if record == nil {
 			continue
 		}
-		entries = append(entries, config.PluginEntry{
+		entries = append(entries, PluginEntry{
 			Path:    record.DLLPath,
 			UIPath:  record.UIDir,
 			Enabled: record.Enabled,
@@ -444,7 +437,7 @@ func (l *Launcher) persist() error {
 	}
 	l.mu.RUnlock()
 	cfg.Plugins = entries
-	if err := cfg.Save(config.ConfigPath(l.exeDir)); err != nil {
+	if err := cfg.Save(ConfigPath(l.exeDir)); err != nil {
 		l.logger.Printf("save settings: %v", err)
 		return fmt.Errorf("save settings: %w", err)
 	}
@@ -456,7 +449,7 @@ func (l *Launcher) persist() error {
 func (l *Launcher) rebuildRecordsLocked() {
 	enabledByPath := make(map[string]bool, len(l.cfg.Plugins))
 	for _, entry := range l.cfg.Plugins {
-		path := winproc.NormalizePath(entry.Path)
+		path := normalizePath(entry.Path)
 		if path != "" {
 			enabledByPath[strings.ToLower(path)] = entry.Enabled
 		}
@@ -479,7 +472,7 @@ func (l *Launcher) rebuildRecordsLocked() {
 	for _, bundle := range l.store.Scan() {
 		record := &pluginRecord{
 			ID:          bundle.ID,
-			Name:        firstNonEmpty(bundle.Name, pluginid.DisplayName(bundle.DLLPath)),
+			Name:        firstNonEmpty(bundle.Name, DisplayName(bundle.DLLPath)),
 			Version:     bundle.Version,
 			Author:      bundle.Author,
 			Description: bundle.Description,
@@ -498,21 +491,21 @@ func (l *Launcher) rebuildRecordsLocked() {
 	}
 
 	for _, entry := range l.cfg.Plugins {
-		path := winproc.NormalizePath(entry.Path)
+		path := normalizePath(entry.Path)
 		if path == "" {
 			continue
 		}
 		if managedDLLs[strings.ToLower(path)] {
 			continue
 		}
-		if !winproc.FileExists(path) {
+		if !isRegularFile(path) {
 			l.logger.Printf("registered plugin is missing: %s", path)
 			continue
 		}
 		record := recordForDLL(path)
 		record.Enabled = entry.Enabled
 		if record.Name == "" {
-			record.Name = pluginid.DisplayName(path)
+			record.Name = DisplayName(path)
 		}
 		add(record)
 	}
@@ -531,11 +524,11 @@ func (l *Launcher) rebuildRecordsLocked() {
 
 func recordForDLL(path string) *pluginRecord {
 	record := &pluginRecord{
-		ID:      pluginid.FromPath(path),
+		ID:      FromPath(path),
 		DLLPath: path,
 		Enabled: true,
 	}
-	if bundle, ok := pluginbundle.LoadForDLL(path); ok {
+	if bundle, ok := LoadForDLL(path); ok {
 		record.ID = bundle.ID
 		record.Name = bundle.Name
 		record.Version = bundle.Version
@@ -546,14 +539,14 @@ func recordForDLL(path string) *pluginRecord {
 		record.UIEntry = bundle.UIEntry
 		return record
 	}
-	if info, err := winver.Read(path); err == nil {
+	if info, err := readVersionInfo(path); err == nil {
 		record.ID = info.ID
 		record.Name = info.Name
 		record.Version = info.Version
 		record.Author = info.Author
 		record.Description = info.Description
 	}
-	record.UIDir, record.UIEntry = pluginbundle.FindUI(path)
+	record.UIDir, record.UIEntry = FindUI(path)
 	return record
 }
 
@@ -566,7 +559,7 @@ func (l *Launcher) record(id string) *pluginRecord {
 func (l *Launcher) setLoaded(paths []string) {
 	loaded := make(map[string]bool, len(paths))
 	for _, path := range paths {
-		loaded[strings.ToLower(winproc.NormalizePath(path))] = true
+		loaded[strings.ToLower(normalizePath(path))] = true
 	}
 	l.mu.Lock()
 	l.loaded = loaded
@@ -594,13 +587,4 @@ func (l *Launcher) kickWatcher() {
 	default:
 		go l.pollProcess()
 	}
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
 }

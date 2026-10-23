@@ -6,7 +6,6 @@ toolchain go1.22.2
 
 require (
 	github.com/tc-hib/winres v0.3.1
-	github.com/ulikunitz/xz v0.5.12
 	github.com/wailsapp/wails/v2 v2.10.1
 	golang.org/x/sys v0.30.0
 )

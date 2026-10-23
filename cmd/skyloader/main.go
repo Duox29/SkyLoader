@@ -1,3 +1,5 @@
+//go:build windows
+
 package main
 
 import (
@@ -7,10 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/HerokeyVN/SkyLoader/internal/buildinfo"
-	"github.com/HerokeyVN/SkyLoader/internal/config"
 	"github.com/HerokeyVN/SkyLoader/internal/launcher"
-	"github.com/HerokeyVN/SkyLoader/internal/logging"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
@@ -22,7 +21,7 @@ var embeddedWeb embed.FS
 
 func main() {
 	exeDir := executableDir()
-	logger, closeLog, err := logging.New(config.LogPath(exeDir))
+	logger, closeLog, err := launcher.NewFileLogger(launcher.LogPath(exeDir))
 	if err != nil {
 		logger = log.New(os.Stderr, "[SkyLoader] ", log.LstdFlags|log.Lmicroseconds)
 		logger.Printf("file logging disabled: %v", err)
@@ -30,7 +29,7 @@ func main() {
 	}
 	defer closeLog()
 
-	core, err := launcher.New(exeDir, buildinfo.Version, logger)
+	core, err := launcher.New(exeDir, launcher.Version, logger)
 	if err != nil {
 		logger.Printf("startup failed: %v", err)
 		showError("SkyLoader could not start", err.Error())
@@ -46,7 +45,7 @@ func main() {
 	}
 
 	err = wails.Run(&options.App{
-		Title:     buildinfo.AppName + " " + buildinfo.Version,
+		Title:     launcher.AppName + " " + launcher.Version,
 		Width:     1040,
 		Height:    720,
 		MinWidth:  760,
@@ -64,7 +63,7 @@ func main() {
 		},
 		Windows: &windows.Options{
 			Theme:               windows.SystemDefault,
-			WebviewUserDataPath: filepath.Join(config.AppDir(exeDir), "webview"),
+			WebviewUserDataPath: filepath.Join(launcher.AppDir(exeDir), "webview"),
 		},
 	})
 	if err != nil {

@@ -1,11 +1,11 @@
+//go:build windows
+
 package launcher
 
 import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/HerokeyVN/SkyLoader/internal/winproc"
 )
 
 const (
@@ -34,7 +34,7 @@ func (l *Launcher) pollProcess() {
 	gamePath := l.cfg.GamePath
 	l.mu.RUnlock()
 
-	process, running := winproc.FindProcess("Sky.exe", gamePath)
+	process, running := findProcess("Sky.exe", gamePath)
 
 	l.mu.Lock()
 	changed := running != l.gameRunning
@@ -45,7 +45,7 @@ func (l *Launcher) pollProcess() {
 	if running {
 		l.running = process
 	} else if l.gameRunning || l.running.PID != 0 {
-		l.running = winproc.Process{}
+		l.running = Process{}
 		l.injectedPID = 0
 		l.attemptedPID = 0
 		l.loaded = map[string]bool{}
@@ -58,8 +58,8 @@ func (l *Launcher) pollProcess() {
 	attemptedPID := l.attemptedPID
 	injectingPID := l.injectingPID
 	var pathUpdate string
-	if running && process.Path != "" && !strings.EqualFold(winproc.NormalizePath(process.Path), winproc.NormalizePath(gamePath)) {
-		l.cfg.GamePath = winproc.NormalizePath(process.Path)
+	if running && process.Path != "" && !strings.EqualFold(normalizePath(process.Path), normalizePath(gamePath)) {
+		l.cfg.GamePath = normalizePath(process.Path)
 		pathUpdate = l.cfg.GamePath
 	}
 	l.mu.Unlock()
@@ -88,7 +88,7 @@ func (l *Launcher) pollProcess() {
 	}
 }
 
-func (l *Launcher) injectAsync(process winproc.Process) {
+func (l *Launcher) injectAsync(process Process) {
 	l.mu.Lock()
 	if l.injectingPID == process.PID {
 		l.mu.Unlock()
@@ -102,7 +102,7 @@ func (l *Launcher) injectAsync(process winproc.Process) {
 	go l.inject(process)
 }
 
-func (l *Launcher) inject(process winproc.Process) {
+func (l *Launcher) inject(process Process) {
 	l.injectMu.Lock()
 	defer l.injectMu.Unlock()
 
@@ -125,12 +125,12 @@ func (l *Launcher) inject(process winproc.Process) {
 		l.emitNotice("error", message)
 	}
 
-	if bootstrap == "" || !winproc.FileExists(bootstrap) {
+	if bootstrap == "" || !isRegularFile(bootstrap) {
 		fail("SkyBootstrap.dll was not found. Choose a valid bootstrap DLL in Settings.")
 		return
 	}
 
-	if err := winproc.InjectDLL(process.PID, bootstrap, injectionLimit); err != nil {
+	if err := injectDLL(process.PID, bootstrap, injectionLimit); err != nil {
 		fail("Could not inject SkyBootstrap into Sky.exe: " + err.Error())
 		return
 	}

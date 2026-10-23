@@ -33,8 +33,9 @@ SkyBootstrap becomes a Go `c-shared` DLL. Plugin ABI 4 keeps the version-3
 `SkyPluginUiMessage`. The launcher and bootstrap communicate over the named
 pipe; the launcher never loads plugin DLLs into its own process.
 
-Zig is provisioned only as the cgo C compiler for the Windows DLL build. It is
-a build-time dependency, not a runtime or user-facing requirement.
+Zig is used only as the cgo C compiler for the Windows DLL build. It is a
+build-time dependency (provided on `PATH` or by CI), not a runtime or
+user-facing requirement.
 
 ## Consequences
 

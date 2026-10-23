@@ -1,3 +1,5 @@
+//go:build windows
+
 package main
 
 import (
@@ -11,7 +13,6 @@ import (
 	"time"
 
 	"github.com/HerokeyVN/SkyLoader/internal/launcher"
-	"github.com/HerokeyVN/SkyLoader/internal/winproc"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -248,7 +249,7 @@ func (a *App) revealPath(path string) error {
 	if strings.TrimSpace(path) == "" {
 		return errors.New("path is empty")
 	}
-	return winproc.OpenPath(path)
+	return a.launcher.OpenPath(path)
 }
 
 func existingDirectory(path string) string {

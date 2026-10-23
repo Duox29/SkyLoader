@@ -7,18 +7,18 @@ on:
 permissions:
   contents: read
 
-env:
-  CGO_ENABLED: "0"
-  SKYLOADER_CACHE: ${{ github.workspace }}/.cache/skyloader
-
 jobs:
-  build:
-    name: Build (${{ matrix.os }})
+  test:
+    name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+    env:
+      # The test job does not build the c-shared DLL; avoid requiring a C
+      # compiler for the cgo exports file on the Windows runner.
+      CGO_ENABLED: "0"
     defaults:
       run:
         shell: bash
@@ -32,33 +32,58 @@ jobs:
           cache-dependency-path: go.sum
 
       - name: Check formatting
-        run: test -z "$(gofmt -l cmd internal tools)"
+        run: test -z "$(gofmt -l cmd internal resources)"
 
       - name: Vet
         run: go vet ./...
 
       - name: Vet Windows packages
-        run: GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./internal/... ./cmd/skyloader/...
+        run: GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./...
 
       - name: Test
         run: go test ./...
 
-      - name: Cache portable Zig
-        uses: actions/cache@v4
+  build:
+    name: Build Windows amd64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
         with:
-          path: ${{ github.workspace }}/.cache/skyloader
-          key: zig-0.13.0-${{ runner.os }}-${{ runner.arch }}
+          go-version: "1.22.x"
+          cache: true
+          cache-dependency-path: go.sum
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
 
       - name: Build launcher
-        run: go run ./tools/buildlauncher
+        run: |
+          mkdir -p dist
+          go run ./resources/genwinres.go
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build \
+            -tags "desktop,production" \
+            -trimpath -buildvcs=false \
+            -ldflags="-s -w -H=windowsgui" \
+            -o dist/SkyLoader.exe ./cmd/skyloader
+          rm -f cmd/skyloader/rsrc_windows_amd64.syso
 
       - name: Build bootstrap
-        run: go run ./tools/buildbootstrap
+        run: |
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=1 \
+            CC="zig cc -target x86_64-windows-gnu" \
+            go build -buildmode=c-shared \
+            -trimpath -buildvcs=false \
+            -ldflags="-s -w" \
+            -o dist/SkyBootstrap.dll ./cmd/skybootstrap
+          rm -f dist/SkyBootstrap.h
 
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
-          name: SkyLoader-${{ runner.os }}-amd64
+          name: SkyLoader-windows-amd64
           if-no-files-found: error
           path: |
             dist/SkyLoader.exe

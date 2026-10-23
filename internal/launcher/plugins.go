@@ -1,3 +1,5 @@
+//go:build windows
+
 package launcher
 
 import (
@@ -8,9 +10,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/HerokeyVN/SkyLoader/internal/pluginbundle"
-	"github.com/HerokeyVN/SkyLoader/internal/pluginid"
-	"github.com/HerokeyVN/SkyLoader/internal/protocol"
 	"github.com/HerokeyVN/SkyLoader/internal/uiserver"
 )
 
@@ -38,16 +37,16 @@ func (l *Launcher) Import(paths []string, force bool) ImportReport {
 		report.Items = append(report.Items, item)
 
 		switch result.Action {
-		case pluginbundle.ActionAdded, pluginbundle.ActionUpdated:
-			if result.Action == pluginbundle.ActionAdded {
+		case ActionAdded, ActionUpdated:
+			if result.Action == ActionAdded {
 				added++
 			} else {
 				updated++
 			}
 			l.afterInstall(result, source)
-		case pluginbundle.ActionConflict:
+		case ActionConflict:
 			conflicts++
-		case pluginbundle.ActionUnchanged:
+		case ActionUnchanged:
 			// Nothing to do; the message already explains why.
 		default:
 			failed++
@@ -78,8 +77,8 @@ func (l *Launcher) Import(paths []string, force bool) ImportReport {
 	return report
 }
 
-func (l *Launcher) afterInstall(result pluginbundle.Result, source string) {
-	bundle, err := pluginbundle.Load(filepath.Join(l.store.Root, pluginid.DirectoryName(result.ID)))
+func (l *Launcher) afterInstall(result Result, source string) {
+	bundle, err := Load(filepath.Join(l.store.Root, DirectoryName(result.ID)))
 	if err != nil {
 		l.logger.Printf("reload imported bundle %s: %v", result.ID, err)
 		return
@@ -290,7 +289,7 @@ func (l *Launcher) PluginRPC(id string, payload []byte) ([]byte, error) {
 
 	response, err := l.client.UI(dllPath, payload)
 	if err != nil {
-		var remote *protocol.RemoteError
+		var remote *uiserver.RemoteError
 		if errors.As(err, &remote) {
 			return nil, errors.New(remote.Message)
 		}
@@ -314,7 +313,7 @@ func (l *Launcher) PluginEvents(id string) ([][]byte, error) {
 	}
 	events, err := l.client.Poll(dllPath)
 	if err != nil {
-		var remote *protocol.RemoteError
+		var remote *uiserver.RemoteError
 		if errors.As(err, &remote) {
 			return nil, errors.New(remote.Message)
 		}
