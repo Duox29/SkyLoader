@@ -84,14 +84,11 @@ func (a *App) GetVersion() string {
 // BrowseGame prompts for Sky.exe and saves the choice.
 func (a *App) BrowseGame() (string, error) {
 	state := a.launcher.State()
-	path, err := runtime.OpenFileDialog(a.context(), runtime.OpenDialogOptions{
-		Title:            "Locate Sky.exe",
-		DefaultDirectory: existingDirectory(filepath.Dir(state.GamePath)),
-		Filters: []runtime.FileFilter{
+	path, err := a.openFileDialog("Locate Sky.exe", filepath.Dir(state.GamePath),
+		[]runtime.FileFilter{
 			{DisplayName: "Sky executable (Sky.exe)", Pattern: "Sky.exe"},
 			{DisplayName: "Executables (*.exe)", Pattern: "*.exe"},
-		},
-	})
+		})
 	if err != nil || path == "" {
 		return "", err
 	}
@@ -109,13 +106,10 @@ func (a *App) SetGamePath(path string) error {
 // BrowseBootstrap prompts for SkyBootstrap.dll and saves the choice.
 func (a *App) BrowseBootstrap() (string, error) {
 	state := a.launcher.State()
-	path, err := runtime.OpenFileDialog(a.context(), runtime.OpenDialogOptions{
-		Title:            "Locate SkyBootstrap.dll",
-		DefaultDirectory: existingDirectory(filepath.Dir(state.BootstrapPath)),
-		Filters: []runtime.FileFilter{
+	path, err := a.openFileDialog("Locate SkyBootstrap.dll", filepath.Dir(state.BootstrapPath),
+		[]runtime.FileFilter{
 			{DisplayName: "SkyBootstrap DLL (*.dll)", Pattern: "*.dll"},
-		},
-	})
+		})
 	if err != nil || path == "" {
 		return "", err
 	}
@@ -252,4 +246,12 @@ func existingDirectory(path string) string {
 		return ""
 	}
 	return path
+}
+
+func (a *App) openFileDialog(title, directory string, filters []runtime.FileFilter) (string, error) {
+	return runtime.OpenFileDialog(a.context(), runtime.OpenDialogOptions{
+		Title:            title,
+		DefaultDirectory: existingDirectory(directory),
+		Filters:          filters,
+	})
 }

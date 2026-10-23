@@ -1,5 +1,7 @@
 //go:build windows
 
+// Settings schema and persistence: KnowsWhere SkyLoader's configuration lives,
+// how it is read, migrated from the legacy INI, and written back.
 package launcher
 
 import (
@@ -69,47 +71,16 @@ func LoadConfig(exeDir string) (Config, string, error) {
 		return Defaults(exeDir), "", err
 	}
 
-	cfg := Defaults(exeDir)
-	status := ""
 	path := ConfigPath(exeDir)
-	data, err := os.ReadFile(path)
-	switch {
-	case err == nil:
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			return Defaults(exeDir), "", fmt.Errorf("parse %s: %w", path, err)
-		}
-	case errors.Is(err, os.ErrNotExist):
-		legacy := filepath.Join(exeDir, legacyININame)
-		if legacyData, legacyErr := os.ReadFile(legacy); legacyErr == nil {
-			if migrated, migrationErr := MigrateINI(string(legacyData), exeDir); migrationErr == nil {
-				cfg = migrated
-				status = "Imported settings from SkyLoader.ini."
-			}
-		}
-	default:
-		return Defaults(exeDir), "", err
+	cfg, status, err := readStoredConfig(path, exeDir)
+	if err != nil {
+		return cfg, "", err
 	}
 
-	if cfg.BootstrapPath == "" {
-		cfg.BootstrapPath = filepath.Join(exeDir, defaultBootstrap)
-	}
-	if !isRegularFile(cfg.BootstrapPath) {
-		if fallback := filepath.Join(exeDir, defaultBootstrap); isRegularFile(fallback) {
-			cfg.BootstrapPath = fallback
-		}
-	}
-	if cfg.GamePath == "" || !isRegularFile(cfg.GamePath) {
-		if detected := detectSkyPath(); detected != "" {
-			cfg.GamePath = detected
-			if status == "" {
-				status = "Auto-detected Sky.exe in a Steam library."
-			}
-		} else if cfg.GamePath == "" {
-			cfg.GamePath = defaultGamePath
-		}
-	}
+	status = cfg.applyBuiltinPaths(exeDir, status)
 	cfg.sanitize(exeDir)
 
+	// A fresh install is persisted at once so the next start skips migration.
 	if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
 		if err := cfg.Save(path); err != nil {
 			return cfg, status, err
@@ -118,6 +89,65 @@ func LoadConfig(exeDir string) (Config, string, error) {
 	return cfg, status, nil
 }
 
+// readStoredConfig reads config.json, importing the legacy SkyLoader.ini once
+// when no configuration file exists yet.
+func readStoredConfig(path, exeDir string) (Config, string, error) {
+	data, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		cfg := Defaults(exeDir)
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return Defaults(exeDir), "", fmt.Errorf("parse %s: %w", path, err)
+		}
+		return cfg, "", nil
+	case errors.Is(err, os.ErrNotExist):
+		cfg, status := configFromLegacyINI(exeDir)
+		return cfg, status, nil
+	default:
+		return Defaults(exeDir), "", err
+	}
+}
+
+// configFromLegacyINI imports the old SkyLoader.ini next to the executable,
+// leaving the defaults in place when there is nothing to migrate.
+func configFromLegacyINI(exeDir string) (Config, string) {
+	legacy, err := os.ReadFile(filepath.Join(exeDir, legacyININame))
+	if err != nil {
+		return Defaults(exeDir), ""
+	}
+	if migrated, migrationErr := MigrateINI(string(legacy), exeDir); migrationErr == nil {
+		return migrated, "Imported settings from SkyLoader.ini."
+	}
+	return Defaults(exeDir), ""
+}
+
+// applyBuiltinPaths fills missing paths with built-in defaults, auto-detecting
+// Sky.exe in a Steam library, and enriches the status message.
+func (c *Config) applyBuiltinPaths(exeDir, status string) string {
+	if c.BootstrapPath == "" {
+		c.BootstrapPath = filepath.Join(exeDir, defaultBootstrap)
+	}
+	if !isRegularFile(c.BootstrapPath) {
+		if fallback := filepath.Join(exeDir, defaultBootstrap); isRegularFile(fallback) {
+			c.BootstrapPath = fallback
+		}
+	}
+	if c.GamePath == "" || !isRegularFile(c.GamePath) {
+		if detected := detectSkyPath(); detected != "" {
+			c.GamePath = detected
+			if status == "" {
+				status = "Auto-detected Sky.exe in a Steam library."
+			}
+		} else if c.GamePath == "" {
+			c.GamePath = defaultGamePath
+		}
+	}
+	return status
+}
+
+// sanitize normalizes registered plugin paths, resolves them against the
+// executable directory, and drops blanks, duplicates, and the retired
+// SkyOverlay.dll.
 func (c *Config) sanitize(exeDir string) {
 	if c.Plugins == nil {
 		c.Plugins = []PluginEntry{}
@@ -152,28 +182,12 @@ func (c *Config) sanitize(exeDir string) {
 
 // Save writes the configuration atomically.
 func (c Config) Save(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
-	temp, err := os.CreateTemp(filepath.Dir(path), ".config-*.json")
-	if err != nil {
-		return err
-	}
-	tempName := temp.Name()
-	defer os.Remove(tempName)
-	if _, err := temp.Write(data); err != nil {
-		temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tempName, path)
+	return writeAtomic(".config-*.json", path, data)
 }
 
 // ParseINI parses the subset of the Windows INI format used by SkyLoader.

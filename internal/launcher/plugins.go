@@ -1,29 +1,21 @@
 //go:build windows
 
+// Plugin lifecycle: discovering bundles, importing files into the managed
+// store, and toggling/removing installed plugins. Low-level mechanics stay in
+// utils.go so each function here reads as a short step list.
+
 package launcher
 
 import (
-	"archive/zip"
-	"crypto/rand"
-	"crypto/sha1"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 
 	"github.com/HerokeyVN/SkyLoader/internal/uiserver"
-)
-
-const (
-	ManifestName   = "plugin.json"
-	maxLength      = 128
-	maxBundleBytes = 300 << 20
-	maxBundleFiles = 10000
 )
 
 // Action describes the outcome of one import.
@@ -46,218 +38,7 @@ type Result struct {
 	Message string
 }
 
-// Manifest describes a plugin bundle. All paths are relative to the bundle
-// root. The DLL's VERSIONINFO remains the source of truth for a SkyPluginId;
-// the manifest may repeat it for convenience. readVersionInfo also docks its
-// VERSIONINFO-derived metadata in this struct, without path fields.
-type Manifest struct {
-	ID          string `json:"id"`
-	Name        string `json:"name,omitempty"`
-	Version     string `json:"version,omitempty"`
-	Author      string `json:"author,omitempty"`
-	Description string `json:"description,omitempty"`
-	DLL         string `json:"dll,omitempty"`
-	UI          string `json:"ui,omitempty"`
-	UIEntry     string `json:"uiEntry,omitempty"`
-}
-
-// Canonical returns the lower-case identity when value is a valid SkyPluginId,
-// and an empty string otherwise.
-func Canonical(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" || len(value) > maxLength || strings.Trim(value, ".") == "" {
-		return ""
-	}
-	out := []byte(value)
-	for i, character := range out {
-		switch {
-		case character >= 'a' && character <= 'z',
-			character >= '0' && character <= '9',
-			character == '.', character == '_', character == '-':
-		case character >= 'A' && character <= 'Z':
-			out[i] = character + ('a' - 'A')
-		default:
-			return ""
-		}
-	}
-	return string(out)
-}
-
-// FromPath derives the legacy filename-based identity used for DLLs without a
-// SkyPluginId. A trailing numeric release suffix (my-mod.14.dll) is ignored.
-func FromPath(filePath string) string {
-	filename := strings.ToLower(windowsBaseName(filePath))
-	extension := filepath.Ext(filename)
-	stem := strings.TrimSuffix(filename, extension)
-	if dot := strings.LastIndexByte(stem, '.'); dot >= 0 && dot+1 < len(stem) &&
-		strings.IndexByte(stem, '.') == dot {
-		numeric := true
-		for i := dot + 1; i < len(stem); i++ {
-			if stem[i] < '0' || stem[i] > '9' {
-				numeric = false
-				break
-			}
-		}
-		if numeric {
-			stem = stem[:dot]
-		}
-	}
-	return stem + extension
-}
-
-// DirectoryName converts an identity into a safe directory name. Valid IDs are
-// already safe; legacy identities are sanitized and hashed when necessary.
-//
-// Names that Win32 would reinterpret fall back to the hashed branch: a
-// trailing dot collapses to a different path, and device names such as CON or
-// NUL are reserved by the filesystem. Canonical identities are lower-case.
-func DirectoryName(id string) string {
-	if canonical := Canonical(id); canonical != "" && len(canonical) <= 80 &&
-		!strings.HasSuffix(canonical, ".") {
-		stem := canonical
-		if dot := strings.IndexByte(stem, '.'); dot >= 0 {
-			stem = stem[:dot]
-		}
-		switch stem {
-		case "con", "prn", "aux", "nul",
-			"com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
-			"lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9":
-		default:
-			return canonical
-		}
-	}
-
-	sanitized := make([]byte, 0, 64)
-	for i := 0; i < len(id) && len(sanitized) < 64; i++ {
-		character := id[i]
-		switch {
-		case character >= 'a' && character <= 'z',
-			character >= '0' && character <= '9',
-			character == '.', character == '_', character == '-':
-			sanitized = append(sanitized, character)
-		case character >= 'A' && character <= 'Z':
-			sanitized = append(sanitized, character+('a'-'A'))
-		default:
-			sanitized = append(sanitized, '_')
-		}
-	}
-	if len(sanitized) == 0 {
-		sanitized = []byte("plugin")
-	}
-	sum := sha1.Sum([]byte(id))
-	return string(sanitized) + "-" + hex.EncodeToString(sum[:4])
-}
-
-// DisplayName returns a readable fallback for a plugin without a PluginName.
-func DisplayName(filePath string) string {
-	base := windowsBaseName(filePath)
-	return strings.TrimSuffix(base, filepath.Ext(base))
-}
-
-// readManifest reads and normalizes the plugin.json document of the bundle
-// rooted at root. A missing manifest yields an empty value.
-func readManifest(root string) (Manifest, error) {
-	data, err := os.ReadFile(filepath.Join(root, ManifestName))
-	if errors.Is(err, os.ErrNotExist) {
-		return Manifest{}, nil
-	}
-	if err != nil {
-		return Manifest{}, err
-	}
-	var manifest Manifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return Manifest{}, fmt.Errorf("parse %s: %w", ManifestName, err)
-	}
-	for _, field := range []struct {
-		name  string
-		value *string
-	}{
-		{"ui", &manifest.UI},
-		{"uiEntry", &manifest.UIEntry},
-		{"dll", &manifest.DLL},
-	} {
-		if *field.value == "" {
-			continue
-		}
-		// Declared paths must stay inside the bundle: trim Windows-style
-		// separators, then reject absolute and escaping paths.
-		relative := strings.TrimSpace(strings.ReplaceAll(*field.value, "\\", "/"))
-		clean := filepath.Clean(filepath.FromSlash(relative))
-		if strings.HasPrefix(relative, "/") || (len(relative) >= 2 && relative[1] == ':') ||
-			clean == "." || !filepath.IsLocal(clean) {
-			return Manifest{}, fmt.Errorf("manifest %s: must be a relative path inside the bundle", field.name)
-		}
-		*field.value = filepath.ToSlash(clean)
-	}
-	return manifest, nil
-}
-
-func findDLL(root string, manifest Manifest) (string, error) {
-	if manifest.DLL != "" {
-		path := filepath.Join(root, filepath.FromSlash(manifest.DLL))
-		if !isRegularFile(path) {
-			return "", fmt.Errorf("bundle DLL %q was not found", manifest.DLL)
-		}
-		return path, nil
-	}
-
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return "", err
-	}
-	var dlls []string
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.EqualFold(filepath.Ext(entry.Name()), ".dll") {
-			dlls = append(dlls, entry.Name())
-		}
-	}
-	switch len(dlls) {
-	case 0:
-		return "", errors.New("bundle has no DLL")
-	case 1:
-		return filepath.Join(root, dlls[0]), nil
-	default:
-		base := strings.ToLower(filepath.Base(root))
-		for _, name := range dlls {
-			if strings.ToLower(strings.TrimSuffix(name, filepath.Ext(name))) == base {
-				return filepath.Join(root, name), nil
-			}
-		}
-		return "", errors.New("bundle has multiple DLLs; set \"dll\" in plugin.json")
-	}
-}
-
-func resolveUI(root string, manifest Manifest) (string, string, error) {
-	uiDir := manifest.UI
-	if uiDir == "" {
-		if isRegularFile(filepath.Join(root, "ui", "index.html")) {
-			uiDir = "ui"
-		} else {
-			return "", "", nil
-		}
-	}
-	absolute := filepath.Join(root, filepath.FromSlash(uiDir))
-	if info, err := os.Stat(absolute); err != nil || !info.IsDir() {
-		return "", "", fmt.Errorf("bundle UI directory %q was not found", uiDir)
-	}
-
-	entry := manifest.UIEntry
-	if entry == "" {
-		entry = filepath.ToSlash(filepath.Join(uiDir, "index.html"))
-	} else if !strings.HasPrefix(filepath.ToSlash(entry), filepath.ToSlash(uiDir)+"/") {
-		// uiEntry may be relative to the UI directory or to the bundle root.
-		entry = filepath.ToSlash(filepath.Join(uiDir, entry))
-	}
-	entryPath := filepath.Join(root, filepath.FromSlash(entry))
-	if !isRegularFile(entryPath) {
-		return "", "", fmt.Errorf("bundle UI entry %q was not found", entry)
-	}
-	relativeEntry, err := filepath.Rel(absolute, entryPath)
-	if err != nil {
-		return "", "", err
-	}
-	return absolute, filepath.ToSlash(relativeEntry), nil
-}
+// --- bundle loading ------------------------------------------------------
 
 // loadBundle validates the bundle rooted at root and resolves its DLL and UI
 // paths. The returned record is not managed until the caller says so.
@@ -274,32 +55,22 @@ func loadBundle(root string) (*pluginRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	info, _ := readVersionInfo(dllPath)
+	versionInfo, _ := readVersionInfo(dllPath)
 
-	id := Canonical(manifest.ID)
-	if manifest.ID != "" && id == "" {
-		return nil, fmt.Errorf("invalid bundle id %q", manifest.ID)
+	id, err := resolveBundleID(manifest, versionInfo, dllPath)
+	if err != nil {
+		return nil, err
 	}
-	if id == "" {
-		id = info.ID
-	}
-	if id == "" {
-		id = FromPath(dllPath)
-	}
-	if manifest.ID != "" && info.ID != "" && id != info.ID {
-		return nil, fmt.Errorf("bundle id %q does not match DLL SkyPluginId %q", id, info.ID)
-	}
-
 	uiDir, uiEntry, err := resolveUI(root, manifest)
 	if err != nil {
 		return nil, err
 	}
 	return &pluginRecord{
 		ID:          id,
-		Name:        firstNonEmpty(manifest.Name, info.Name, DisplayName(dllPath)),
-		Version:     firstNonEmpty(manifest.Version, info.Version),
-		Author:      firstNonEmpty(manifest.Author, info.Author),
-		Description: firstNonEmpty(manifest.Description, info.Description),
+		Name:        firstNonEmpty(manifest.Name, versionInfo.Name, DisplayName(dllPath)),
+		Version:     firstNonEmpty(manifest.Version, versionInfo.Version),
+		Author:      firstNonEmpty(manifest.Author, versionInfo.Author),
+		Description: firstNonEmpty(manifest.Description, versionInfo.Description),
 		DLLPath:     dllPath,
 		BundleRoot:  root,
 		UIDir:       uiDir,
@@ -322,11 +93,14 @@ func bundleForDLL(dllPath string) (*pluginRecord, bool) {
 	return bundle, true
 }
 
+// recordForDLL builds the plugin record for a registered DLL outside the
+// managed store: a bundle sibling if one exists, else VERSIONINFO metadata,
+// else a filename-derived identity with an optional sidecar UI directory.
 func recordForDLL(path string) *pluginRecord {
-	record := &pluginRecord{ID: FromPath(path), DLLPath: path, Enabled: true}
 	if bundle, ok := bundleForDLL(path); ok {
 		return bundle
 	}
+	record := &pluginRecord{ID: FromPath(path), DLLPath: path, Enabled: true}
 	if info, err := readVersionInfo(path); err == nil {
 		record.ID = info.ID
 		record.Name = info.Name
@@ -336,20 +110,14 @@ func recordForDLL(path string) *pluginRecord {
 	}
 	// Legacy plugins may keep their UI next to the DLL instead of inside a
 	// plugin.json bundle.
-	directory := filepath.Dir(path)
-	stem := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	for _, candidate := range []string{
-		filepath.Join(directory, stem+".ui"),
-		filepath.Join(directory, "ui"),
-	} {
-		if isRegularFile(filepath.Join(candidate, "index.html")) {
-			record.UIDir, record.UIEntry = candidate, "index.html"
-			break
-		}
+	if candidate := sidecarUIDirectory(path); candidate != "" {
+		record.UIDir, record.UIEntry = candidate, "index.html"
 	}
 	return record
 }
 
+// scanBundles loads every bundle directory of the managed store, skipping
+// staging leftovers of interrupted imports.
 func scanBundles(root string) []*pluginRecord {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -368,20 +136,14 @@ func scanBundles(root string) []*pluginRecord {
 	return bundles
 }
 
-func pluginResult(action Action, bundle *pluginRecord, message string) Result {
-	return Result{Action: action, ID: bundle.ID, Name: bundle.Name, Version: bundle.Version, Message: message}
-}
-
-func importError(err error) Result {
-	return Result{Action: ActionFailed, Message: err.Error()}
-}
-
+// --- importing -----------------------------------------------------------
+//
 // importPlugin installs a DLL, a zip bundle, or an unpacked bundle directory
 // into the managed store. Missing destinations are added as-is; existing ones
-// go through the version/dll-name conflict policy and are replaced by
-// renaming the staged copy into place after the old directory is parked in a
-// sibling .old- directory (locked files on Windows cannot be deleted in
-// place, but an empty directory can be renamed).
+// go through the conflict policy and are replaced by renaming the staged copy
+// into place after the old directory is parked in a sibling .old- directory
+// (locked files on Windows cannot be deleted in place, but an empty directory
+// can be renamed).
 func importPlugin(root, input string, force bool) Result {
 	input, err := filepath.Abs(input)
 	if err != nil {
@@ -403,36 +165,9 @@ func importPlugin(root, input string, force bool) Result {
 		}
 	}()
 
-	switch {
-	case info.IsDir():
-		resolved, err := resolveBundleRoot(input)
-		if err != nil {
-			return importError(err)
-		}
-		if err := copyTree(resolved, stage); err != nil {
-			return importError(err)
-		}
-	case strings.EqualFold(filepath.Ext(input), ".zip"):
-		if err := extractZip(input, stage); err != nil {
-			return importError(err)
-		}
-		resolved, err := resolveBundleRoot(stage)
-		if err != nil {
-			return importError(err)
-		}
-		if resolved != stage {
-			if err := moveContents(resolved, stage); err != nil {
-				return importError(err)
-			}
-		}
-	case strings.EqualFold(filepath.Ext(input), ".dll"):
-		if err := stageDLL(input, stage); err != nil {
-			return importError(err)
-		}
-	default:
-		return Result{Action: ActionFailed, Message: "Drop a .dll, a .zip bundle, or a bundle folder."}
+	if err := stageSource(input, stage, info); err != nil {
+		return importError(err)
 	}
-
 	bundle, err := loadBundle(stage)
 	if err != nil {
 		return importError(err)
@@ -440,55 +175,52 @@ func importPlugin(root, input string, force bool) Result {
 
 	destination := filepath.Join(root, DirectoryName(bundle.ID))
 	if _, err := os.Stat(destination); err != nil {
-		if err := os.Rename(stage, destination); err != nil {
-			return Result{Action: ActionFailed, ID: bundle.ID, Message: err.Error()}
-		}
-		keepStage = true // the stage moved into place
-		return pluginResult(ActionAdded, bundle, "Plugin added.")
+		result, kept := adoptBundleStage(stage, destination, bundle)
+		keepStage = kept // the stage moved into place
+		return result
 	}
-
-	existing, loadErr := loadBundle(destination)
-	if loadErr == nil && !force {
-		if existing.ID != bundle.ID {
-			return pluginResult(ActionConflict, bundle,
-				fmt.Sprintf("The destination already contains plugin %s.", existing.ID))
-		}
-		if existing.Version != "" && bundle.Version != "" {
-			if compareVersions(bundle.Version, existing.Version) < 0 {
-				return pluginResult(ActionUnchanged, bundle,
-					fmt.Sprintf("Newer %s version %s is already installed.", existing.Name, existing.Version))
-			}
-		} else if (existing.Version == "") != (bundle.Version == "") {
-			return pluginResult(ActionConflict, bundle,
-				"Installed and incoming builds disagree about version metadata. Replace it?")
-		} else if !strings.EqualFold(filepath.Base(existing.DLLPath), filepath.Base(bundle.DLLPath)) {
-			return pluginResult(ActionConflict, bundle,
-				"A plugin with the same name is already installed. Replace it?")
-		}
-	}
-
-	suffix := "tmp"
-	bytes := make([]byte, 6)
-	if _, err := rand.Read(bytes); err == nil {
-		suffix = hex.EncodeToString(bytes)
-	}
-	old := filepath.Join(root, ".old-"+suffix)
-	if err := os.Rename(destination, old); err != nil {
-		return Result{
-			Action: ActionFailed, ID: bundle.ID,
-			Message: "The installed plugin is in use. Close Sky and try again.",
-		}
-	}
-	if err := os.Rename(stage, destination); err != nil {
-		_ = os.Rename(old, destination)
-		return Result{Action: ActionFailed, ID: bundle.ID, Message: err.Error()}
-	}
-	_ = os.RemoveAll(old)
-	keepStage = true // the stage moved into place
-	return pluginResult(ActionUpdated, bundle, "Plugin updated.")
+	result, kept := replaceBundle(root, stage, destination, bundle, force)
+	keepStage = kept // the stage moved into place
+	return result
 }
 
-// stageDLL copies a single DLL plus an optional sidecar UI directory.
+// errUnsupportedPlugin rejects inputs that are neither a directory, a zip
+// bundle, nor a DLL.
+var errUnsupportedPlugin = errors.New("Drop a .dll, a .zip bundle, or a bundle folder.")
+
+// stageSource materializes the input inside the staging directory: bundle
+// directories are copied as-is, zips are unpacked and flattened when an
+// archive wrapped the bundle in a folder, and lone DLLs are staged together
+// with an optional sidecar UI directory.
+func stageSource(input, stage string, info os.FileInfo) error {
+	switch {
+	case info.IsDir():
+		resolved, err := resolveBundleRoot(input)
+		if err != nil {
+			return err
+		}
+		return copyTree(resolved, stage)
+	case strings.EqualFold(filepath.Ext(input), ".zip"):
+		if err := extractZip(input, stage); err != nil {
+			return err
+		}
+		resolved, err := resolveBundleRoot(stage)
+		if err != nil {
+			return err
+		}
+		if resolved == stage {
+			return nil
+		}
+		return moveContents(resolved, stage)
+	case strings.EqualFold(filepath.Ext(input), ".dll"):
+		return stageDLL(input, stage)
+	default:
+		return errUnsupportedPlugin
+	}
+}
+
+// stageDLL copies a single DLL plus an optional sidecar UI directory into the
+// staging directory and writes the manifest that describes the staged bundle.
 func stageDLL(source, stage string) error {
 	info, err := os.Stat(source)
 	if err != nil {
@@ -501,17 +233,9 @@ func stageDLL(source, stage string) error {
 		return err
 	}
 
-	directory := filepath.Dir(source)
-	stem := strings.TrimSuffix(filepath.Base(source), filepath.Ext(source))
-	for _, candidate := range []string{
-		filepath.Join(directory, stem+".ui"),
-		filepath.Join(directory, "ui"),
-	} {
-		if isRegularFile(filepath.Join(candidate, "index.html")) {
-			if err := copyTree(candidate, filepath.Join(stage, "ui")); err != nil {
-				return err
-			}
-			break
+	if candidate := sidecarUIDirectory(source); candidate != "" {
+		if err := copyTree(candidate, filepath.Join(stage, "ui")); err != nil {
+			return err
 		}
 	}
 
@@ -543,190 +267,79 @@ func stageDLL(source, stage string) error {
 	return os.WriteFile(filepath.Join(stage, ManifestName), data, 0o644)
 }
 
-func resolveBundleRoot(directory string) (string, error) {
-	if isRegularFile(filepath.Join(directory, ManifestName)) {
-		return directory, nil
+// adoptBundleStage moves a never-before-installed bundle into the store.
+func adoptBundleStage(stage, destination string, bundle *pluginRecord) (Result, bool) {
+	if err := os.Rename(stage, destination); err != nil {
+		return Result{Action: ActionFailed, ID: bundle.ID, Message: err.Error()}, false
 	}
-	entries, err := os.ReadDir(directory)
-	if err != nil {
-		return "", err
-	}
-	var directories []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			directories = append(directories, filepath.Join(directory, entry.Name()))
-		}
-	}
-	if len(directories) == 1 {
-		child := directories[0]
-		if isRegularFile(filepath.Join(child, ManifestName)) || hasDLL(child) {
-			return child, nil
-		}
-	}
-	if hasDLL(directory) {
-		return directory, nil
-	}
-	return "", errors.New("bundle has no plugin.json or DLL")
+	return pluginResult(ActionAdded, bundle, "Plugin added."), true
 }
 
-func hasDLL(directory string) bool {
-	found := false
-	_ = filepath.WalkDir(directory, func(path string, entry os.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || found {
-			return nil
+// replaceBundle reconciles a staged import with what is already installed.
+// The conflict policy may decline the file; otherwise the old directory is
+// parked aside and the staged copy takes its place.
+func replaceBundle(root, stage, destination string, bundle *pluginRecord, force bool) (Result, bool) {
+	existing, loadErr := loadBundle(destination)
+	if loadErr == nil && !force {
+		if declined, ok := conflictPolicy(existing, bundle); ok {
+			return declined, false
 		}
-		if strings.EqualFold(filepath.Ext(entry.Name()), ".dll") {
-			found = true
-		}
-		return nil
-	})
-	return found
+	}
+
+	old := filepath.Join(root, ".old-"+randomSuffix())
+	if err := os.Rename(destination, old); err != nil {
+		return Result{
+			Action: ActionFailed, ID: bundle.ID,
+			Message: "The installed plugin is in use. Close Sky and try again.",
+		}, false
+	}
+	if err := os.Rename(stage, destination); err != nil {
+		_ = os.Rename(old, destination)
+		return Result{Action: ActionFailed, ID: bundle.ID, Message: err.Error()}, false
+	}
+	_ = os.RemoveAll(old)
+	return pluginResult(ActionUpdated, bundle, "Plugin updated."), true
 }
 
-func copyTree(source, destination string) error {
-	if err := os.MkdirAll(destination, 0o755); err != nil {
-		return err
+// conflictPolicy decides whether an import must stop before replacing an
+// existing installation: a different plugin, an older build, or disagreeing
+// metadata declines it; false lets the replacement proceed.
+func conflictPolicy(existing, bundle *pluginRecord) (Result, bool) {
+	switch {
+	case existing.ID != bundle.ID:
+		return pluginResult(ActionConflict, bundle,
+			fmt.Sprintf("The destination already contains plugin %s.", existing.ID)), true
+	case existing.Version != "" && bundle.Version != "":
+		if compareVersions(bundle.Version, existing.Version) < 0 {
+			return pluginResult(ActionUnchanged, bundle,
+				fmt.Sprintf("Newer %s version %s is already installed.", existing.Name, existing.Version)), true
+		}
+	case (existing.Version == "") != (bundle.Version == ""):
+		return pluginResult(ActionConflict, bundle,
+			"Installed and incoming builds disagree about version metadata. Replace it?"), true
+	case !strings.EqualFold(filepath.Base(existing.DLLPath), filepath.Base(bundle.DLLPath)):
+		return pluginResult(ActionConflict, bundle,
+			"A plugin with the same name is already installed. Replace it?"), true
 	}
-	var total int64
-	files := 0
-	return filepath.WalkDir(source, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		relative, err := filepath.Rel(source, path)
-		if err != nil || relative == "." {
-			return err
-		}
-		target := filepath.Join(destination, relative)
-		if entry.Type()&os.ModeSymlink != 0 {
-			return fmt.Errorf("bundle contains a symbolic link: %s", relative)
-		}
-		if entry.IsDir() {
-			return os.MkdirAll(target, 0o755)
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		total += info.Size()
-		files++
-		if total > maxBundleBytes {
-			return errors.New("bundle is too large")
-		}
-		if files > maxBundleFiles {
-			return errors.New("bundle contains too many files")
-		}
-		return copyFile(path, target)
-	})
+	return Result{}, false
 }
 
-func copyFile(source, destination string) error {
-	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
-		return err
-	}
-	input, err := os.Open(source)
-	if err != nil {
-		return err
-	}
-	defer input.Close()
-
-	output, err := os.OpenFile(destination, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	_, copyErr := io.Copy(output, io.LimitReader(input, maxBundleBytes+1))
-	closeErr := output.Close()
-	if copyErr != nil {
-		return copyErr
-	}
-	return closeErr
+func pluginResult(action Action, bundle *pluginRecord, message string) Result {
+	return Result{Action: action, ID: bundle.ID, Name: bundle.Name, Version: bundle.Version, Message: message}
 }
 
-func moveContents(source, destination string) error {
-	entries, err := os.ReadDir(source)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if err := os.Rename(filepath.Join(source, entry.Name()), filepath.Join(destination, entry.Name())); err != nil {
-			return err
-		}
-	}
-	return nil
+func importError(err error) Result {
+	return Result{Action: ActionFailed, Message: err.Error()}
 }
 
-// extractZip extracts a bundle zip with traversal and zip-bomb protection.
-func extractZip(source, destination string) error {
-	reader, err := zip.OpenReader(source)
-	if err != nil {
-		return fmt.Errorf("open bundle zip: %w", err)
-	}
-	defer reader.Close()
-
-	var total int64
-	files := 0
-	for _, entry := range reader.File {
-		name := filepath.Clean(filepath.FromSlash(strings.ReplaceAll(entry.Name, "\\", "/")))
-		if name == "." || !filepath.IsLocal(name) {
-			return fmt.Errorf("bundle contains an unsafe path: %q", entry.Name)
-		}
-		if entry.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("bundle contains a symbolic link: %q", entry.Name)
-		}
-
-		target := filepath.Join(destination, name)
-		if entry.FileInfo().IsDir() {
-			if err := os.MkdirAll(target, 0o755); err != nil {
-				return err
-			}
-			continue
-		}
-
-		total += int64(entry.UncompressedSize64)
-		files++
-		if total > maxBundleBytes {
-			return errors.New("bundle is too large")
-		}
-		if files > maxBundleFiles {
-			return errors.New("bundle contains too many files")
-		}
-		if err := copyZipEntry(entry, target); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// copyZipEntry writes one zip member. Its parent directory is created before
-// the member is opened, as folder imports do.
-func copyZipEntry(entry *zip.File, target string) error {
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return err
-	}
-	input, err := entry.Open()
-	if err != nil {
-		return err
-	}
-	defer input.Close()
-
-	output, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	_, copyErr := io.Copy(output, io.LimitReader(input, int64(entry.UncompressedSize64)+1))
-	closeErr := output.Close()
-	if copyErr != nil {
-		return copyErr
-	}
-	return closeErr
-}
+// --- launcher-facing lifecycle -------------------------------------------
 
 // Import installs DLLs, zip bundles, or unpacked bundle directories into the
 // managed store. A conflicting bundle is returned as an item with action
 // "conflict"; retry the same call with force=true after confirmation.
 func (l *Launcher) Import(paths []string, force bool) ImportReport {
 	report := ImportReport{Paths: append([]string(nil), paths...), Force: force}
-	var added, updated, conflicts, failed int
+	var tally importTally
 
 	for _, source := range paths {
 		source = strings.TrimSpace(source)
@@ -738,47 +351,62 @@ func (l *Launcher) Import(paths []string, force bool) ImportReport {
 			Source: source, Action: string(result.Action), ID: result.ID,
 			Name: result.Name, Version: result.Version, Message: result.Message,
 		})
-
-		switch result.Action {
-		case ActionAdded, ActionUpdated:
-			if result.Action == ActionAdded {
-				added++
-			} else {
-				updated++
-			}
+		tally.count(result.Action)
+		if result.Action == ActionAdded || result.Action == ActionUpdated {
 			l.afterInstall(result, source)
-		case ActionConflict:
-			conflicts++
-		case ActionUnchanged:
-		default:
-			failed++
 		}
 	}
 
-	switch {
-	case conflicts > 0:
-		report.NeedsConfirm = true
-		report.Message = "One or more plugins already exist. Confirm replacement to continue."
-	case added+updated > 0:
-		report.Message = fmt.Sprintf("Imported %d plugin(s): %d added, %d updated.", added+updated, added, updated)
-	case len(report.Items) > 0:
-		report.Message = "No plugin files were changed."
-	}
-	if failed > 0 {
-		if report.Message != "" {
-			report.Message += " "
-		}
-		report.Message += fmt.Sprintf("%d plugin(s) could not be imported.", failed)
-	}
-	if len(report.Items) == 0 {
-		report.Message = "No plugin files were selected."
-	}
+	report.Message, report.NeedsConfirm = tally.summarize(len(report.Items))
 	if report.Message != "" {
 		l.Notice("info", report.Message)
 	}
 	return report
 }
 
+// importTally counts import outcomes and renders the report message.
+type importTally struct {
+	added, updated, conflicts, failed int
+}
+
+func (t *importTally) count(action Action) {
+	switch action {
+	case ActionAdded:
+		t.added++
+	case ActionUpdated:
+		t.updated++
+	case ActionConflict:
+		t.conflicts++
+	case ActionUnchanged:
+	default:
+		t.failed++
+	}
+}
+
+func (t *importTally) summarize(itemCount int) (message string, needsConfirm bool) {
+	switch {
+	case t.conflicts > 0:
+		message = "One or more plugins already exist. Confirm replacement to continue."
+		needsConfirm = true
+	case t.added+t.updated > 0:
+		message = fmt.Sprintf("Imported %d plugin(s): %d added, %d updated.", t.added+t.updated, t.added, t.updated)
+	case itemCount > 0:
+		message = "No plugin files were changed."
+	}
+	if t.failed > 0 {
+		if message != "" {
+			message += " "
+		}
+		message += fmt.Sprintf("%d plugin(s) could not be imported.", t.failed)
+	}
+	if itemCount == 0 {
+		message = "No plugin files were selected."
+	}
+	return message, needsConfirm
+}
+
+// afterInstall registers the installed bundle, persists it, and — when Sky is
+// already injected with SkyBootstrap — asks the game to load it at once.
 func (l *Launcher) afterInstall(result Result, source string) {
 	bundle, err := loadBundle(filepath.Join(l.storeRoot, DirectoryName(result.ID)))
 	if err != nil {
@@ -839,25 +467,32 @@ func (l *Launcher) SetPluginEnabled(id string, enabled bool) error {
 	}
 
 	if injected {
-		var pipeErr error
-		if enabled {
-			pipeErr = l.client.Load(dllPath)
-		} else {
-			pipeErr = l.client.Unload(dllPath)
-		}
-		if pipeErr != nil {
-			l.setStatus("Setting saved, but Sky did not accept it: " + pipeErr.Error())
-		} else if enabled {
-			l.setStatus("Plugin loaded into Sky.")
-		} else {
-			l.setStatus("Plugin unloaded from Sky.")
-		}
-		l.refreshLoaded()
+		l.applyEnabledToSky(dllPath, enabled)
 	} else {
 		l.setStatus("Plugin setting saved.")
 	}
 	l.notify()
 	return nil
+}
+
+// applyEnabledToSky loads or unloads a plugin in the injected game and reports
+// the outcome.
+func (l *Launcher) applyEnabledToSky(dllPath string, enabled bool) {
+	var pipeErr error
+	if enabled {
+		pipeErr = l.client.Load(dllPath)
+	} else {
+		pipeErr = l.client.Unload(dllPath)
+	}
+	switch {
+	case pipeErr != nil:
+		l.setStatus("Setting saved, but Sky did not accept it: " + pipeErr.Error())
+	case enabled:
+		l.setStatus("Plugin loaded into Sky.")
+	default:
+		l.setStatus("Plugin unloaded from Sky.")
+	}
+	l.refreshLoaded()
 }
 
 // RemovePlugin unregisters a plugin. Managed bundles are deleted from the
@@ -876,23 +511,8 @@ func (l *Launcher) RemovePlugin(id string) error {
 	if injected {
 		_ = l.client.Unload(record.DLLPath)
 	}
-
-	if record.Managed {
-		directory := record.BundleRoot
-		if directory == "" {
-			directory = filepath.Dir(record.DLLPath)
-		}
-		directory = filepath.Clean(directory)
-		if directory == l.storeRoot {
-			return errors.New("refusing to delete the managed plugin store itself")
-		}
-		if relative, err := filepath.Rel(l.storeRoot, directory); err != nil ||
-			relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			return errors.New("refusing to delete a plugin outside the managed store")
-		}
-		if err := os.RemoveAll(directory); err != nil {
-			return fmt.Errorf("remove plugin files (close Sky and try again): %w", err)
-		}
+	if err := l.removeManagedBundle(record); err != nil {
+		return err
 	}
 
 	l.mu.Lock()
@@ -913,6 +533,63 @@ func (l *Launcher) RemovePlugin(id string) error {
 	l.refreshLoaded()
 	return nil
 }
+
+// removeManagedBundle deletes the directory of a managed bundle. It refuses
+// anything that is not safely within the managed plugin store.
+func (l *Launcher) removeManagedBundle(record *pluginRecord) error {
+	if !record.Managed {
+		return nil
+	}
+	directory := record.BundleRoot
+	if directory == "" {
+		directory = filepath.Dir(record.DLLPath)
+	}
+	directory = filepath.Clean(directory)
+	if directory == l.storeRoot {
+		return errors.New("refusing to delete the managed plugin store itself")
+	}
+	if relative, err := filepath.Rel(l.storeRoot, directory); err != nil ||
+		relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return errors.New("refusing to delete a plugin outside the managed store")
+	}
+	if err := os.RemoveAll(directory); err != nil {
+		return fmt.Errorf("remove plugin files (close Sky and try again): %w", err)
+	}
+	return nil
+}
+
+// --- plugin registry --------------------------------------------------------
+
+// addRecord registers a record by its lower-case identity, ignoring
+// duplicates.
+func (l *Launcher) addRecord(record *pluginRecord) {
+	key := strings.ToLower(record.ID)
+	if l.plugins[key] != nil {
+		l.logger.Printf("ignoring duplicate plugin id %q at %s", record.ID, record.DLLPath)
+		return
+	}
+	l.plugins[key] = record
+	l.order = append(l.order, key)
+}
+
+// sortPluginOrder orders identities alphabetically by display name, then ID.
+func sortPluginOrder(order []string, plugins map[string]*pluginRecord) {
+	name := func(id string) string {
+		record := plugins[id]
+		if record == nil {
+			return ""
+		}
+		return strings.ToLower(firstNonEmpty(record.Name, record.ID))
+	}
+	slices.SortStableFunc(order, func(a, b string) int {
+		if compared := strings.Compare(name(a), name(b)); compared != 0 {
+			return compared
+		}
+		return strings.Compare(strings.ToLower(plugins[a].ID), strings.ToLower(plugins[b].ID))
+	})
+}
+
+// --- plugin UI bridge --------------------------------------------------------
 
 func (l *Launcher) pluginAndInjected(id string) (*pluginRecord, bool) {
 	l.mu.RLock()
@@ -971,4 +648,53 @@ func (l *Launcher) PluginEvents(id string) ([][]byte, error) {
 		return nil, err
 	}
 	return events, nil
+}
+
+// --- record rehydration (called during construction) ---------------------------
+
+// enabledStateByPath maps lower-case DLL paths onto their saved enabled state.
+func enabledStateByPath(entries []PluginEntry) map[string]bool {
+	enabled := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		if path := normalizePath(entry.Path); path != "" {
+			enabled[strings.ToLower(path)] = entry.Enabled
+		}
+	}
+	return enabled
+}
+
+// loadManagedRecords registers bundles from the managed store and returns the
+// set of lower-case DLL paths it registered.
+func (l *Launcher) loadManagedRecords(enabledByPath map[string]bool) map[string]bool {
+	managedDLLs := map[string]bool{}
+	for _, record := range scanBundles(l.storeRoot) {
+		if enabled, ok := enabledByPath[strings.ToLower(record.DLLPath)]; ok {
+			record.Enabled = enabled
+		}
+		record.Managed = true
+		managedDLLs[strings.ToLower(record.DLLPath)] = true
+		l.addRecord(record)
+	}
+	return managedDLLs
+}
+
+// loadRegisteredRecords registers the remaining DLLs named by the settings,
+// warning about paths that no longer exist.
+func (l *Launcher) loadRegisteredRecords(enabledByPath, managedDLLs map[string]bool) {
+	for _, entry := range l.cfg.Plugins {
+		path := normalizePath(entry.Path)
+		if path == "" || managedDLLs[strings.ToLower(path)] {
+			continue
+		}
+		if !isRegularFile(path) {
+			l.logger.Printf("registered plugin is missing: %s", path)
+			continue
+		}
+		record := recordForDLL(path)
+		record.Enabled = entry.Enabled
+		if record.Name == "" {
+			record.Name = DisplayName(path)
+		}
+		l.addRecord(record)
+	}
 }

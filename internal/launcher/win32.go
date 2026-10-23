@@ -38,18 +38,6 @@ var (
 	procLoadLibraryW       = kernel32.NewProc("LoadLibraryW")
 )
 
-// normalizePath returns a clean absolute Windows path when possible.
-func normalizePath(path string) string {
-	path = strings.TrimSpace(strings.ReplaceAll(path, "/", `\`))
-	if path == "" {
-		return ""
-	}
-	if absolute, err := filepath.Abs(path); err == nil {
-		path = absolute
-	}
-	return filepath.Clean(path)
-}
-
 // findProcess looks for exeName. When expectedPath is non-empty, a process
 // whose image path matches it is preferred; otherwise the first match is
 // returned.

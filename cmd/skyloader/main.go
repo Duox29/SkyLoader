@@ -22,12 +22,7 @@ var embeddedWeb embed.FS
 
 func main() {
 	exeDir := executableDir()
-	logger, closeLog, err := launcher.NewFileLogger(launcher.LogPath(exeDir))
-	if err != nil {
-		logger = log.New(os.Stderr, "[SkyLoader] ", log.LstdFlags|log.Lmicroseconds)
-		logger.Printf("file logging disabled: %v", err)
-		closeLog = func() {}
-	}
+	logger, closeLog := newLogger(exeDir)
 	defer closeLog()
 
 	core, err := launcher.New(exeDir, launcher.Version, logger)
@@ -82,6 +77,18 @@ func executableDir() string {
 		return "."
 	}
 	return filepath.Dir(executable)
+}
+
+// newLogger opens the file log, falling back to stderr when the file is
+// unavailable. The close function is always safe to defer.
+func newLogger(exeDir string) (*log.Logger, func()) {
+	logger, closeLog, err := launcher.NewFileLogger(launcher.LogPath(exeDir))
+	if err == nil {
+		return logger, closeLog
+	}
+	logger = log.New(os.Stderr, "[SkyLoader] ", log.LstdFlags|log.Lmicroseconds)
+	logger.Printf("file logging disabled: %v", err)
+	return logger, func() {}
 }
 
 func showError(title, message string) {

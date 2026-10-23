@@ -11,9 +11,7 @@ import (
 	"io"
 	"log"
 	"os"
-	"path"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 
@@ -267,6 +265,8 @@ func (l *Launcher) State() State {
 	return state
 }
 
+// --- settings -------------------------------------------------------------
+
 // SetGamePath normalizes and persists a new Sky.exe path.
 func (l *Launcher) SetGamePath(path string) error {
 	path = normalizePath(path)
@@ -302,6 +302,74 @@ func (l *Launcher) SetAutoInject(enabled bool) error {
 	}
 	return nil
 }
+
+// saveConfig applies an edit to the settings and persists them.
+func (l *Launcher) saveConfig(status string, edit func(*Config)) error {
+	l.mu.Lock()
+	edit(&l.cfg)
+	l.mu.Unlock()
+	if err := l.persist(); err != nil {
+		return err
+	}
+	l.setStatus(status)
+	return nil
+}
+
+// persist writes the current settings, including the plugin registry, to
+// config.json.
+func (l *Launcher) persist() error {
+	l.saveMu.Lock()
+	defer l.saveMu.Unlock()
+
+	l.mu.RLock()
+	cfg := l.cfg
+	entries := make([]PluginEntry, 0, len(l.order))
+	for _, key := range l.order {
+		record := l.plugins[key]
+		if record == nil {
+			continue
+		}
+		entries = append(entries, PluginEntry{
+			Path:    record.DLLPath,
+			UIPath:  record.UIDir,
+			Enabled: record.Enabled,
+		})
+	}
+	l.mu.RUnlock()
+	cfg.Plugins = entries
+	if err := cfg.Save(ConfigPath(l.exeDir)); err != nil {
+		l.logger.Printf("save settings: %v", err)
+		return fmt.Errorf("save settings: %w", err)
+	}
+	return nil
+}
+
+func (l *Launcher) setStatus(message string) {
+	if message == "" {
+		return
+	}
+	l.mu.Lock()
+	l.status = message
+	l.mu.Unlock()
+	l.logger.Printf("%s", message)
+	l.notify()
+}
+
+// --- plugin registry --------------------------------------------------------
+
+// rebuildRecords rehydrates the plugin registry from the managed store and
+// the saved settings. It runs during construction while the launcher is not
+// shared yet.
+func (l *Launcher) rebuildRecords() {
+	enabledByPath := enabledStateByPath(l.cfg.Plugins)
+	l.plugins, l.order = map[string]*pluginRecord{}, nil
+
+	managedDLLs := l.loadManagedRecords(enabledByPath)
+	l.loadRegisteredRecords(enabledByPath, managedDLLs)
+	sortPluginOrder(l.order, l.plugins)
+}
+
+// --- launch and injection -----------------------------------------------------
 
 // Launch starts Sky through Steam, or injects into an already running game.
 func (l *Launcher) Launch() (string, error) {
@@ -345,6 +413,8 @@ func (l *Launcher) Inject() error {
 	return nil
 }
 
+// --- opening files, folders, and links ------------------------------------------
+
 // OpenPath opens a file or folder in its default Windows handler.
 func (l *Launcher) OpenPath(path string) error {
 	if strings.TrimSpace(path) == "" {
@@ -362,6 +432,8 @@ func (l *Launcher) OpenURL(url string) error {
 	}
 	return openPath(url)
 }
+
+// --- plugin URLs and folders --------------------------------------------------------
 
 // PluginURL returns the authenticated local URL for a plugin's UI.
 func (l *Launcher) PluginURL(id string) (string, error) {
@@ -394,6 +466,8 @@ func (l *Launcher) PluginFolder(id string) (string, error) {
 	}
 	return filepath.Dir(record.DLLPath), nil
 }
+
+// --- updates ------------------------------------------------------------------------
 
 // CheckUpdates queries GitHub and downloads an installer when a newer release
 // exists. The returned view is also stored in State.
@@ -436,122 +510,7 @@ func (l *Launcher) OpenUpdate() error {
 	return l.OpenURL(url)
 }
 
-func (l *Launcher) saveConfig(status string, edit func(*Config)) error {
-	l.mu.Lock()
-	edit(&l.cfg)
-	l.mu.Unlock()
-	if err := l.persist(); err != nil {
-		return err
-	}
-	l.setStatus(status)
-	return nil
-}
-
-func (l *Launcher) setStatus(message string) {
-	if message == "" {
-		return
-	}
-	l.mu.Lock()
-	l.status = message
-	l.mu.Unlock()
-	l.logger.Printf("%s", message)
-	l.notify()
-}
-
-func (l *Launcher) persist() error {
-	l.saveMu.Lock()
-	defer l.saveMu.Unlock()
-
-	l.mu.RLock()
-	cfg := l.cfg
-	entries := make([]PluginEntry, 0, len(l.order))
-	for _, key := range l.order {
-		record := l.plugins[key]
-		if record == nil {
-			continue
-		}
-		entries = append(entries, PluginEntry{
-			Path:    record.DLLPath,
-			UIPath:  record.UIDir,
-			Enabled: record.Enabled,
-		})
-	}
-	l.mu.RUnlock()
-	cfg.Plugins = entries
-	if err := cfg.Save(ConfigPath(l.exeDir)); err != nil {
-		l.logger.Printf("save settings: %v", err)
-		return fmt.Errorf("save settings: %w", err)
-	}
-	return nil
-}
-
-// rebuildRecords is called during construction while the launcher is not
-// shared yet.
-func (l *Launcher) rebuildRecords() {
-	enabledByPath := make(map[string]bool, len(l.cfg.Plugins))
-	for _, entry := range l.cfg.Plugins {
-		if path := normalizePath(entry.Path); path != "" {
-			enabledByPath[strings.ToLower(path)] = entry.Enabled
-		}
-	}
-
-	l.plugins = map[string]*pluginRecord{}
-	l.order = nil
-
-	managedDLLs := map[string]bool{}
-	for _, record := range scanBundles(l.storeRoot) {
-		if enabled, ok := enabledByPath[strings.ToLower(record.DLLPath)]; ok {
-			record.Enabled = enabled
-		}
-		record.Managed = true
-		managedDLLs[strings.ToLower(record.DLLPath)] = true
-		l.addRecord(record)
-	}
-
-	for _, entry := range l.cfg.Plugins {
-		path := normalizePath(entry.Path)
-		if path == "" || managedDLLs[strings.ToLower(path)] {
-			continue
-		}
-		if !isRegularFile(path) {
-			l.logger.Printf("registered plugin is missing: %s", path)
-			continue
-		}
-		record := recordForDLL(path)
-		record.Enabled = entry.Enabled
-		if record.Name == "" {
-			record.Name = DisplayName(path)
-		}
-		l.addRecord(record)
-	}
-	sortPluginOrder(l.order, l.plugins)
-}
-
-func (l *Launcher) addRecord(record *pluginRecord) {
-	key := strings.ToLower(record.ID)
-	if l.plugins[key] != nil {
-		l.logger.Printf("ignoring duplicate plugin id %q at %s", record.ID, record.DLLPath)
-		return
-	}
-	l.plugins[key] = record
-	l.order = append(l.order, key)
-}
-
-func sortPluginOrder(order []string, plugins map[string]*pluginRecord) {
-	name := func(id string) string {
-		record := plugins[id]
-		if record == nil {
-			return ""
-		}
-		return strings.ToLower(firstNonEmpty(record.Name, record.ID))
-	}
-	slices.SortStableFunc(order, func(a, b string) int {
-		if compared := strings.Compare(name(a), name(b)); compared != 0 {
-			return compared
-		}
-		return strings.Compare(strings.ToLower(plugins[a].ID), strings.ToLower(plugins[b].ID))
-	})
-}
+// --- watcher plumbing ----------------------------------------------------------------
 
 func (l *Launcher) setLoaded(paths []string) {
 	loaded := make(map[string]bool, len(paths))
@@ -578,39 +537,4 @@ func (l *Launcher) kickWatcher() {
 	default:
 		go l.pollProcess()
 	}
-}
-
-// NewFileLogger opens path for appending and returns a logger plus its close
-// function.
-func NewFileLogger(path string) (*log.Logger, func(), error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, nil, err
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		return nil, nil, err
-	}
-	logger := log.New(io.MultiWriter(file, os.Stderr), "[SkyLoader] ",
-		log.LstdFlags|log.Lmicroseconds)
-	return logger, func() { _ = file.Close() }, nil
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
-}
-
-// windowsBaseName returns the final element of a Windows or POSIX path. Plugin
-// paths are Windows paths even when tests run on another operating system.
-func windowsBaseName(filePath string) string {
-	return path.Base(strings.ReplaceAll(filePath, `\`, "/"))
-}
-
-func isRegularFile(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular()
 }
