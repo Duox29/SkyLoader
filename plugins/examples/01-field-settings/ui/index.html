@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Field Settings (sample)</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div>
+      <h1>Field Settings</h1>
+      <p class="muted">Sample 01 — scalar fields exchanged with the plugin over
+        <code>window.sky.call</code>.</p>
+    </div>
+    <div class="meta" id="plugin-meta"></div>
+  </header>
+
+  <main>
+    <section class="panel">
+      <h2>Fields</h2>
+      <div class="form-grid">
+        <label for="nickname">Nickname <span class="muted">(1–48 bytes)</span>
+          <input id="nickname" type="text" maxlength="48" autocomplete="off">
+        </label>
+        <label for="theme">Theme
+          <select id="theme">
+            <option value="auto">auto</option>
+            <option value="dark">dark</option>
+            <option value="light">light</option>
+          </select>
+        </label>
+        <label for="volume">Volume <span class="muted" id="volume-value"></span>
+          <input id="volume" type="range" min="0" max="100" step="1">
+        </label>
+        <label for="sensitivity">Sensitivity <span class="muted">(0.25–8.0)</span>
+          <input id="sensitivity" type="number" min="0.25" max="8" step="0.25">
+        </label>
+        <label class="check" for="notifications">
+          <input id="notifications" type="checkbox"> Notifications
+        </label>
+      </div>
+      <div class="buttons">
+        <button id="reload" class="primary">Reload from plugin</button>
+        <button id="save" class="primary">Save changes</button>
+        <button id="reset">Reset to defaults</button>
+        <button id="demo-bad" class="demo">Demo: invalid field</button>
+      </div>
+      <p id="error" class="error hidden"></p>
+    </section>
+
+    <section class="panel">
+      <h2>Wire log <span class="muted">(what crosses window.sky)</span></h2>
+      <pre id="wire" class="wire"></pre>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

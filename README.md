@@ -172,6 +172,10 @@ and the `post_event` callback are optional. See
 [Creating a SkyLoader plugin](docs/creating-a-plugin.md) for the complete ABI,
 manifest schema, web bridge, and build example.
 
+Ready-to-run sample bundles — one per data pattern (scalar fields, ordered
+lists, nested structs with dot paths and pushed events) plus detailed guides —
+live in [`plugins/`](plugins/README.md).
+
 ### Web UI bridge
 
 SkyLoader injects `window.sky` into every plugin page:
@@ -199,6 +203,7 @@ cmd/skybootstrap/     c-shared DLL entry points and in-game host
 internal/launcher/    settings, plugin store, watcher, injection, updater
 internal/uiserver/    authenticated loopback server, JS bridge, pipe protocol
 libraries/            public plugin ABI header
+plugins/              sample plugin bundles, shared kit, and plugin guides
 resources/            launcher icon, manifest, and resource generator
 installer/            Inno Setup script
 ```

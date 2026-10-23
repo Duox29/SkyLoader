@@ -5,6 +5,11 @@ The launcher injects `SkyBootstrap.dll` into Sky, and the bootstrap host loads
 the plugin DLL from inside the game process. Plugin UIs run outside the game in
 SkyLoader's window or a browser and talk to the DLL through a JSON bridge.
 
+Runnable sample bundles and deeper guides (bundle lifecycle, UI bridge
+internals, field/list/struct payload patterns, testing) live in
+[`plugins/`](../plugins/README.md). This document remains the canonical ABI
+and manifest reference.
+
 The ABI is C-compatible and defined in
 [`libraries/SkyBootstrap/include/skybootstrap_api.h`](../libraries/SkyBootstrap/include/skybootstrap_api.h).
 It works from C, C++, Rust, Zig, or any toolchain that produces an x64 DLL.
