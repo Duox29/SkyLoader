@@ -181,3 +181,54 @@ func TestReadVersionInfoRejectsNonPE(t *testing.T) {
 		t.Fatal("expected a file without VERSIONINFO to fail")
 	}
 }
+
+func TestImportTallySummaries(t *testing.T) {
+	tests := []struct {
+		name    string
+		actions []Action
+		items   int
+		want    string
+		confirm bool
+	}{
+		{"nothing selected", nil, 0, "No plugin files were selected.", false},
+		{"added and updated", []Action{ActionAdded, ActionUpdated, ActionAdded}, 3,
+			"Imported 3 plugin(s): 2 added, 1 updated.", false},
+		{"unchanged only", []Action{ActionUnchanged}, 1, "No plugin files were changed.", false},
+		{"conflict needs confirmation", []Action{ActionConflict, ActionAdded}, 2,
+			"One or more plugins already exist. Confirm replacement to continue.", true},
+		{"failure after success", []Action{ActionAdded, ActionFailed}, 2,
+			"Imported 1 plugin(s): 1 added, 0 updated. 1 plugin(s) could not be imported.", false},
+		{"failure only", []Action{ActionFailed}, 1,
+			"No plugin files were changed. 1 plugin(s) could not be imported.", false},
+		{"conflict and failure", []Action{ActionConflict, ActionFailed}, 2,
+			"One or more plugins already exist. Confirm replacement to continue. 1 plugin(s) could not be imported.", true},
+	}
+	for _, test := range tests {
+		var tally importTally
+		for _, action := range test.actions {
+			tally.count(action)
+		}
+		got, confirm := tally.summarize(test.items)
+		if got != test.want || confirm != test.confirm {
+			t.Errorf("%s: summarize = (%q, %v), want (%q, %v)", test.name, got, confirm, test.want, test.confirm)
+		}
+	}
+}
+
+func TestPluginRecordHelpers(t *testing.T) {
+	bundle := &pluginRecord{DLLPath: `C:\store\p\bin\p.dll`, BundleRoot: `C:\store\p`, UIDir: `C:\store\p\ui`, UIEntry: "index.html"}
+	if got := bundle.folder(); got != `C:\store\p` {
+		t.Fatalf("bundle folder = %q", got)
+	}
+	if !bundle.hasUI() {
+		t.Fatal("bundle with UI directory and entry should report a UI")
+	}
+
+	legacy := &pluginRecord{DLLPath: `C:\mods\legacy.dll`, UIDir: `C:\mods\ui`}
+	if got := legacy.folder(); got != `C:\mods` {
+		t.Fatalf("legacy folder = %q", got)
+	}
+	if legacy.hasUI() || (&pluginRecord{UIEntry: "index.html"}).hasUI() {
+		t.Fatal("a UI needs both a directory and an entry")
+	}
+}

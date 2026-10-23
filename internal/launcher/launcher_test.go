@@ -253,3 +253,83 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestApplyBuiltinPathsBootstrapFallback(t *testing.T) {
+	game := filepath.Join(t.TempDir(), "Sky.exe")
+	writeFile(t, game, "game")
+	custom := filepath.Join(t.TempDir(), "custom.dll")
+	writeFile(t, custom, "x")
+	missing := filepath.Join(t.TempDir(), "gone.dll")
+
+	tests := []struct {
+		name          string
+		configured    string
+		bundledExists bool
+		want          func(bundled string) string
+	}{
+		{"empty uses bundled even when absent", "", false, func(b string) string { return b }},
+		{"empty uses bundled when present", "", true, func(b string) string { return b }},
+		{"missing falls back to present bundled", missing, true, func(b string) string { return b }},
+		{"missing stays when bundled is absent", missing, false, func(string) string { return missing }},
+		{"existing is kept", custom, true, func(string) string { return custom }},
+	}
+	for _, test := range tests {
+		exeDir := t.TempDir()
+		bundled := filepath.Join(exeDir, defaultBootstrap)
+		if test.bundledExists {
+			writeFile(t, bundled, "x")
+		}
+		cfg := Config{GamePath: game, BootstrapPath: test.configured}
+		cfg.applyBuiltinPaths(exeDir, "")
+		if want := test.want(bundled); cfg.BootstrapPath != want {
+			t.Errorf("%s: BootstrapPath = %q, want %q", test.name, cfg.BootstrapPath, want)
+		}
+	}
+}
+
+func TestOpenURLRejectsNonHTTP(t *testing.T) {
+	var l Launcher
+	for _, url := range []string{
+		"", "   ", "ftp://example.com", "javascript:alert(1)", "file:///C:/Windows/System32/cmd.exe",
+		"steam://run/2325290", "example.com",
+	} {
+		err := l.OpenURL(url)
+		if err == nil || err.Error() != "only http and https links are allowed" {
+			t.Errorf("OpenURL(%q) = %v, want the http/https rejection", url, err)
+		}
+	}
+}
+
+func TestInjectedAndRecordAccessors(t *testing.T) {
+	l := &Launcher{
+		plugins: map[string]*pluginRecord{"a": {ID: "a"}, "b": {ID: "b"}},
+		order:   []string{"b", "ghost", "a"},
+	}
+	var ids []string
+	for _, record := range l.recordsLocked() {
+		ids = append(ids, record.ID)
+	}
+	if strings.Join(ids, ",") != "b,a" {
+		t.Fatalf("recordsLocked order = %v, want [b a] with unknown keys skipped", ids)
+	}
+
+	tests := []struct {
+		running  bool
+		pid      uint32
+		injected uint32
+		want     bool
+	}{
+		{false, 0, 0, false},
+		{false, 7, 7, false},
+		{true, 7, 7, true},
+		{true, 7, 6, false},
+		{true, 7, 0, false},
+	}
+	for _, test := range tests {
+		l.gameRunning, l.running, l.injectedPID = test.running, Process{PID: test.pid}, test.injected
+		if got := l.injectedLocked(); got != test.want {
+			t.Errorf("injectedLocked(running=%v pid=%d injected=%d) = %v, want %v",
+				test.running, test.pid, test.injected, got, test.want)
+		}
+	}
+}

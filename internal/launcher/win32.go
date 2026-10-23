@@ -319,11 +319,8 @@ func (l *Launcher) watch() {
 }
 
 func (l *Launcher) pollProcess() {
-	l.mu.RLock()
-	gamePath := l.cfg.GamePath
-	l.mu.RUnlock()
-
-	process, running := findProcess("Sky.exe", gamePath)
+	gamePath := l.gamePath()
+	process, running := findProcess(skyImageName, gamePath)
 
 	l.mu.Lock()
 	changed := running != l.gameRunning
@@ -333,7 +330,8 @@ func (l *Launcher) pollProcess() {
 	l.gameRunning = running
 	if running {
 		l.running = process
-	} else if l.gameRunning || l.running.PID != 0 {
+	} else if l.running.PID != 0 {
+		// The game just exited (gameRunning was already cleared above).
 		l.running = Process{}
 		l.injectedPID = 0
 		l.attemptedPID = 0
@@ -398,9 +396,8 @@ func (l *Launcher) inject(process Process) {
 	l.mu.RLock()
 	bootstrap := l.cfg.BootstrapPath
 	enabled := make([]pluginRecord, 0, len(l.plugins))
-	for _, key := range l.order {
-		record := l.plugins[key]
-		if record != nil && record.Enabled && !record.Missing {
+	for _, record := range l.recordsLocked() {
+		if record.Enabled && !record.Missing {
 			enabled = append(enabled, *record)
 		}
 	}
@@ -414,7 +411,7 @@ func (l *Launcher) inject(process Process) {
 		l.Notice("error", message)
 	}
 
-	if bootstrap == "" || !isRegularFile(bootstrap) {
+	if !isRegularFile(bootstrap) {
 		fail("SkyBootstrap.dll was not found. Choose a valid bootstrap DLL in Settings.")
 		return
 	}

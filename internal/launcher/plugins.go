@@ -7,7 +7,6 @@
 package launcher
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -173,14 +172,15 @@ func importPlugin(root, input string, force bool) Result {
 		return importError(err)
 	}
 
+	// keepStage reports that the stage moved into place and must not be
+	// removed by the deferred cleanup.
+	var result Result
 	destination := filepath.Join(root, DirectoryName(bundle.ID))
 	if _, err := os.Stat(destination); err != nil {
-		result, kept := adoptBundleStage(stage, destination, bundle)
-		keepStage = kept // the stage moved into place
-		return result
+		result, keepStage = adoptBundleStage(stage, destination, bundle)
+	} else {
+		result, keepStage = replaceBundle(root, stage, destination, bundle, force)
 	}
-	result, kept := replaceBundle(root, stage, destination, bundle, force)
-	keepStage = kept // the stage moved into place
 	return result
 }
 
@@ -259,11 +259,10 @@ func stageDLL(source, stage string) error {
 		manifest.UI = "ui"
 	}
 
-	data, err := json.MarshalIndent(manifest, "", "  ")
+	data, err := encodeJSON(manifest)
 	if err != nil {
 		return err
 	}
-	data = append(data, '\n')
 	return os.WriteFile(filepath.Join(stage, ManifestName), data, 0o644)
 }
 
@@ -384,6 +383,9 @@ func (t *importTally) count(action Action) {
 }
 
 func (t *importTally) summarize(itemCount int) (message string, needsConfirm bool) {
+	if itemCount == 0 {
+		return "No plugin files were selected.", false
+	}
 	switch {
 	case t.conflicts > 0:
 		message = "One or more plugins already exist. Confirm replacement to continue."
@@ -398,9 +400,6 @@ func (t *importTally) summarize(itemCount int) (message string, needsConfirm boo
 			message += " "
 		}
 		message += fmt.Sprintf("%d plugin(s) could not be imported.", t.failed)
-	}
-	if itemCount == 0 {
-		message = "No plugin files were selected."
 	}
 	return message, needsConfirm
 }
@@ -426,7 +425,7 @@ func (l *Launcher) afterInstall(result Result, source string) {
 		l.order = append(l.order, key)
 	}
 	sortPluginOrder(l.order, l.plugins)
-	injected := l.gameRunning && l.injectedPID == l.running.PID
+	injected := l.injectedLocked()
 	l.mu.Unlock()
 
 	if err := l.persist(); err != nil {
@@ -458,7 +457,7 @@ func (l *Launcher) SetPluginEnabled(id string, enabled bool) error {
 	}
 	record.Enabled = enabled
 	dllPath := record.DLLPath
-	injected := l.gameRunning && l.injectedPID == l.running.PID
+	injected := l.injectedLocked()
 	l.mu.Unlock()
 
 	if err := l.persist(); err != nil {
@@ -505,7 +504,7 @@ func (l *Launcher) RemovePlugin(id string) error {
 		l.mu.Unlock()
 		return errors.New("plugin was not found")
 	}
-	injected := l.gameRunning && l.injectedPID == l.running.PID
+	injected := l.injectedLocked()
 	l.mu.Unlock()
 
 	if injected {
@@ -540,11 +539,7 @@ func (l *Launcher) removeManagedBundle(record *pluginRecord) error {
 	if !record.Managed {
 		return nil
 	}
-	directory := record.BundleRoot
-	if directory == "" {
-		directory = filepath.Dir(record.DLLPath)
-	}
-	directory = filepath.Clean(directory)
+	directory := filepath.Clean(record.folder())
 	if directory == l.storeRoot {
 		return errors.New("refusing to delete the managed plugin store itself")
 	}
@@ -559,6 +554,61 @@ func (l *Launcher) removeManagedBundle(record *pluginRecord) error {
 }
 
 // --- plugin registry --------------------------------------------------------
+
+// pluginRecord is one registered plugin: either a managed bundle in the store
+// or a legacy DLL registered by absolute path.
+type pluginRecord struct {
+	ID          string
+	Name        string
+	Version     string
+	Author      string
+	Description string
+	DLLPath     string
+	BundleRoot  string
+	UIDir       string
+	UIEntry     string
+	Enabled     bool
+	Managed     bool
+	Missing     bool
+}
+
+// hasUI reports whether the plugin ships a web UI the launcher can serve.
+func (r *pluginRecord) hasUI() bool {
+	return r.UIDir != "" && r.UIEntry != ""
+}
+
+// folder returns the plugin's bundle root, or the DLL's directory for legacy
+// plugins that are not bundles.
+func (r *pluginRecord) folder() string {
+	if r.BundleRoot != "" {
+		return r.BundleRoot
+	}
+	return filepath.Dir(r.DLLPath)
+}
+
+// rebuildRecords rehydrates the plugin registry from the managed store and
+// the saved settings. It runs during construction while the launcher is not
+// shared yet.
+func (l *Launcher) rebuildRecords() {
+	enabledByPath := enabledStateByPath(l.cfg.Plugins)
+	l.plugins, l.order = map[string]*pluginRecord{}, nil
+
+	managedDLLs := l.loadManagedRecords(enabledByPath)
+	l.loadRegisteredRecords(enabledByPath, managedDLLs)
+	sortPluginOrder(l.order, l.plugins)
+}
+
+// recordsLocked returns the registered plugins in display order. The caller
+// must hold l.mu.
+func (l *Launcher) recordsLocked() []*pluginRecord {
+	records := make([]*pluginRecord, 0, len(l.order))
+	for _, key := range l.order {
+		if record := l.plugins[key]; record != nil {
+			records = append(records, record)
+		}
+	}
+	return records
+}
 
 // addRecord registers a record by its lower-case identity, ignoring
 // duplicates.
@@ -595,7 +645,7 @@ func (l *Launcher) pluginAndInjected(id string) (*pluginRecord, bool) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	record := l.plugins[strings.ToLower(id)]
-	return record, record != nil && l.gameRunning && l.injectedPID == l.running.PID
+	return record, record != nil && l.injectedLocked()
 }
 
 // PluginUI implements uiserver.Source.
@@ -603,7 +653,7 @@ func (l *Launcher) PluginUI(id string) (uiserver.Plugin, bool) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	record := l.plugins[strings.ToLower(id)]
-	if record == nil || record.UIDir == "" || record.UIEntry == "" {
+	if record == nil || !record.hasUI() {
 		return uiserver.Plugin{}, false
 	}
 	return uiserver.Plugin{

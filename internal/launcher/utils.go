@@ -64,6 +64,13 @@ func isRegularFile(path string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
+// isHTTPURL reports whether value starts with an http:// or https:// scheme,
+// ignoring case. Callers trim surrounding whitespace first.
+func isHTTPURL(value string) bool {
+	lower := strings.ToLower(value)
+	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
+}
+
 // firstNonEmpty returns the first value that is not blank.
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
@@ -211,17 +218,28 @@ func Canonical(value string) string {
 	}
 	out := []byte(value)
 	for i, character := range out {
-		switch {
-		case character >= 'a' && character <= 'z',
-			character >= '0' && character <= '9',
-			character == '.', character == '_', character == '-':
-		case character >= 'A' && character <= 'Z':
-			out[i] = character + ('a' - 'A')
-		default:
+		lower, ok := lowerIDByte(character)
+		if !ok {
 			return ""
 		}
+		out[i] = lower
 	}
 	return string(out)
+}
+
+// lowerIDByte lower-cases one character of a plugin identity. It reports
+// false for characters a SkyPluginId may not contain: anything but ASCII
+// letters, digits, '.', '_' and '-'.
+func lowerIDByte(character byte) (byte, bool) {
+	switch {
+	case character >= 'a' && character <= 'z',
+		character >= '0' && character <= '9',
+		character == '.', character == '_', character == '-':
+		return character, true
+	case character >= 'A' && character <= 'Z':
+		return character + ('a' - 'A'), true
+	}
+	return 0, false
 }
 
 // FromPath derives the legacy filename-based identity used for DLLs without a
@@ -230,20 +248,24 @@ func FromPath(filePath string) string {
 	filename := strings.ToLower(windowsBaseName(filePath))
 	extension := filepath.Ext(filename)
 	stem := strings.TrimSuffix(filename, extension)
-	if dot := strings.LastIndexByte(stem, '.'); dot >= 0 && dot+1 < len(stem) &&
-		strings.IndexByte(stem, '.') == dot {
-		numeric := true
-		for i := dot + 1; i < len(stem); i++ {
-			if stem[i] < '0' || stem[i] > '9' {
-				numeric = false
-				break
-			}
-		}
-		if numeric {
-			stem = stem[:dot]
-		}
+	if dot := strings.LastIndexByte(stem, '.'); dot >= 0 &&
+		strings.IndexByte(stem, '.') == dot && isDigits(stem[dot+1:]) {
+		stem = stem[:dot]
 	}
 	return stem + extension
+}
+
+// isDigits reports whether value is a non-empty run of ASCII digits.
+func isDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // DirectoryName converts an identity into a safe directory name. Valid IDs are
@@ -270,17 +292,11 @@ func DirectoryName(id string) string {
 
 	sanitized := make([]byte, 0, 64)
 	for i := 0; i < len(id) && len(sanitized) < 64; i++ {
-		character := id[i]
-		switch {
-		case character >= 'a' && character <= 'z',
-			character >= '0' && character <= '9',
-			character == '.', character == '_', character == '-':
-			sanitized = append(sanitized, character)
-		case character >= 'A' && character <= 'Z':
-			sanitized = append(sanitized, character+('a'-'A'))
-		default:
-			sanitized = append(sanitized, '_')
+		lower, ok := lowerIDByte(id[i])
+		if !ok {
+			lower = '_'
 		}
+		sanitized = append(sanitized, lower)
 	}
 	if len(sanitized) == 0 {
 		sanitized = []byte("plugin")
@@ -297,7 +313,7 @@ func DisplayName(filePath string) string {
 
 // Manifest describes a plugin bundle. All paths are relative to the bundle
 // root. The DLL's VERSIONINFO remains the source of truth for a SkyPluginId;
-// the manifest may repeat it for convenience. readVersionInfo also docks its
+// the manifest may repeat it for convenience. readVersionInfo also carries its
 // VERSIONINFO-derived metadata in this struct, without path fields.
 // It lives beside the manifest helpers in this file because they own the
 // plugin.json contract.
@@ -491,18 +507,18 @@ func resolveBundleRoot(directory string) (string, error) {
 func hasDLL(directory string) bool {
 	found := false
 	_ = filepath.WalkDir(directory, func(path string, entry os.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || found {
+		if err != nil || entry.IsDir() {
 			return nil
 		}
 		if strings.EqualFold(filepath.Ext(entry.Name()), ".dll") {
 			found = true
+			return filepath.SkipAll
 		}
 		return nil
 	})
 	return found
 }
 
-// extractZip extracts a bundle zip with traversal and zip-bomb protection.
 // --- archives -------------------------------------------------------------
 
 // extractZip extracts a bundle zip with traversal and zip-bomb protection.
@@ -670,6 +686,16 @@ func httpGet(ctx context.Context, label, url, userAgent, accept string,
 // decodeJSON decodes a JSON document whose size is bounded by limit.
 func decodeJSON(body io.Reader, limit int64, value any) error {
 	return json.NewDecoder(io.LimitReader(body, limit)).Decode(value)
+}
+
+// encodeJSON renders value as the two-space-indented, newline-terminated JSON
+// used for every file SkyLoader writes (config.json and staged plugin.json).
+func encodeJSON(value any) ([]byte, error) {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
 }
 
 // maxDownload caps the size of one downloaded release installer.

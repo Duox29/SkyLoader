@@ -25,6 +25,12 @@ const (
 	AppName = "SkyLoader"
 )
 
+const (
+	readyStatus  = "Ready. Start Sky from Steam or click Launch Sky."
+	skySteamURL  = "steam://run/2325290"
+	skyImageName = "Sky.exe"
+)
+
 // PluginView is the frontend-safe description of one registered plugin.
 type PluginView struct {
 	ID          string `json:"id"`
@@ -116,21 +122,6 @@ type Launcher struct {
 	done     chan struct{}
 }
 
-type pluginRecord struct {
-	ID          string
-	Name        string
-	Version     string
-	Author      string
-	Description string
-	DLLPath     string
-	BundleRoot  string
-	UIDir       string
-	UIEntry     string
-	Enabled     bool
-	Managed     bool
-	Missing     bool
-}
-
 // New loads settings, discovers the managed plugin store, starts the local UI
 // server, and begins watching for Sky.exe.
 func New(exeDir, version string, logger *log.Logger) (*Launcher, error) {
@@ -146,6 +137,9 @@ func New(exeDir, version string, logger *log.Logger) (*Launcher, error) {
 		cfg = Defaults(exeDir)
 		status = "Could not read settings: " + err.Error()
 		logger.Printf("%s", status)
+	}
+	if status == "" {
+		status = readyStatus
 	}
 
 	storeRoot := PluginDir(exeDir)
@@ -167,9 +161,6 @@ func New(exeDir, version string, logger *log.Logger) (*Launcher, error) {
 		done:      make(chan struct{}),
 	}
 	l.rebuildRecords()
-	if l.status == "" {
-		l.status = "Ready. Start Sky from Steam or click Launch Sky."
-	}
 
 	server, err := uiserver.New(l)
 	if err != nil {
@@ -197,11 +188,15 @@ func (l *Launcher) SetEmitter(emit func(name string, data ...any)) {
 	l.mu.Unlock()
 }
 
-func (l *Launcher) notify() {
+// emitter returns the installed frontend callback, or nil before one is set.
+func (l *Launcher) emitter() func(name string, data ...any) {
 	l.mu.RLock()
-	emit := l.emit
-	l.mu.RUnlock()
-	if emit != nil {
+	defer l.mu.RUnlock()
+	return l.emit
+}
+
+func (l *Launcher) notify() {
+	if emit := l.emitter(); emit != nil {
 		emit("state", l.State())
 	}
 }
@@ -211,10 +206,7 @@ func (l *Launcher) Notice(kind, message string) {
 	if message == "" {
 		return
 	}
-	l.mu.RLock()
-	emit := l.emit
-	l.mu.RUnlock()
-	if emit != nil {
+	if emit := l.emitter(); emit != nil {
 		emit("notice", map[string]string{"kind": kind, "message": message})
 	}
 }
@@ -237,32 +229,39 @@ func (l *Launcher) State() State {
 		AutoInject:     l.cfg.AutoInject,
 		GameRunning:    l.gameRunning,
 		GamePID:        l.running.PID,
-		Injected:       l.gameRunning && l.injectedPID == l.running.PID,
+		Injected:       l.injectedLocked(),
 		Update:         l.update,
 		Status:         l.status,
 		Plugins:        make([]PluginView, 0, len(l.order)),
 	}
-	for _, id := range l.order {
-		record := l.plugins[id]
-		if record == nil {
-			continue
-		}
-		state.Plugins = append(state.Plugins, PluginView{
-			ID:          record.ID,
-			Name:        record.Name,
-			Version:     record.Version,
-			Author:      record.Author,
-			Description: record.Description,
-			Path:        record.DLLPath,
-			UIPath:      record.UIDir,
-			HasUI:       record.UIDir != "" && record.UIEntry != "",
-			Enabled:     record.Enabled,
-			Managed:     record.Managed,
-			Missing:     record.Missing,
-			Loaded:      l.loaded[strings.ToLower(record.DLLPath)],
-		})
+	for _, record := range l.recordsLocked() {
+		state.Plugins = append(state.Plugins, pluginView(record, l.loaded[strings.ToLower(record.DLLPath)]))
 	}
 	return state
+}
+
+// pluginView describes a registered plugin for the frontend.
+func pluginView(record *pluginRecord, loaded bool) PluginView {
+	return PluginView{
+		ID:          record.ID,
+		Name:        record.Name,
+		Version:     record.Version,
+		Author:      record.Author,
+		Description: record.Description,
+		Path:        record.DLLPath,
+		UIPath:      record.UIDir,
+		HasUI:       record.hasUI(),
+		Enabled:     record.Enabled,
+		Managed:     record.Managed,
+		Missing:     record.Missing,
+		Loaded:      loaded,
+	}
+}
+
+// injectedLocked reports whether SkyBootstrap is loaded into the running
+// game. The caller must hold l.mu.
+func (l *Launcher) injectedLocked() bool {
+	return l.gameRunning && l.injectedPID == l.running.PID
 }
 
 // --- settings -------------------------------------------------------------
@@ -323,12 +322,9 @@ func (l *Launcher) persist() error {
 
 	l.mu.RLock()
 	cfg := l.cfg
-	entries := make([]PluginEntry, 0, len(l.order))
-	for _, key := range l.order {
-		record := l.plugins[key]
-		if record == nil {
-			continue
-		}
+	records := l.recordsLocked()
+	entries := make([]PluginEntry, 0, len(records))
+	for _, record := range records {
 		entries = append(entries, PluginEntry{
 			Path:    record.DLLPath,
 			UIPath:  record.UIDir,
@@ -355,62 +351,52 @@ func (l *Launcher) setStatus(message string) {
 	l.notify()
 }
 
-// --- plugin registry --------------------------------------------------------
-
-// rebuildRecords rehydrates the plugin registry from the managed store and
-// the saved settings. It runs during construction while the launcher is not
-// shared yet.
-func (l *Launcher) rebuildRecords() {
-	enabledByPath := enabledStateByPath(l.cfg.Plugins)
-	l.plugins, l.order = map[string]*pluginRecord{}, nil
-
-	managedDLLs := l.loadManagedRecords(enabledByPath)
-	l.loadRegisteredRecords(enabledByPath, managedDLLs)
-	sortPluginOrder(l.order, l.plugins)
-}
-
 // --- launch and injection -----------------------------------------------------
 
 // Launch starts Sky through Steam, or injects into an already running game.
 func (l *Launcher) Launch() (string, error) {
-	l.mu.RLock()
-	gamePath := l.cfg.GamePath
-	l.mu.RUnlock()
-
-	process, running := findProcess("Sky.exe", gamePath)
-	if running {
-		l.mu.Lock()
-		l.pending = true
-		l.mu.Unlock()
+	if process, running := l.findGame(); running {
+		l.setPending(true)
 		l.injectAsync(process)
 		return "Sky.exe is already running; loading SkyBootstrap.", nil
 	}
 
-	if err := openPath("steam://run/2325290"); err != nil {
+	if err := openPath(skySteamURL); err != nil {
 		return "", fmt.Errorf("could not open Steam: %w", err)
 	}
-	l.mu.Lock()
-	l.pending = true
-	l.mu.Unlock()
+	l.setPending(true)
 	l.setStatus("Steam was asked to start Sky. Waiting for Sky.exe...")
 	return "Waiting for Steam to start Sky.exe...", nil
 }
 
 // Inject loads SkyBootstrap and the enabled plugins into the running game.
 func (l *Launcher) Inject() error {
-	l.mu.RLock()
-	gamePath := l.cfg.GamePath
-	l.mu.RUnlock()
-
-	process, running := findProcess("Sky.exe", gamePath)
+	process, running := l.findGame()
 	if !running {
 		return errors.New("Sky.exe is not running")
 	}
-	l.mu.Lock()
-	l.pending = false
-	l.mu.Unlock()
+	l.setPending(false)
 	l.injectAsync(process)
 	return nil
+}
+
+// gamePath returns the configured Sky.exe path.
+func (l *Launcher) gamePath() string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.cfg.GamePath
+}
+
+// findGame looks for the running Sky process, preferring the configured path.
+func (l *Launcher) findGame() (Process, bool) {
+	return findProcess(skyImageName, l.gamePath())
+}
+
+// setPending records whether a launch request is waiting for Sky to appear.
+func (l *Launcher) setPending(pending bool) {
+	l.mu.Lock()
+	l.pending = pending
+	l.mu.Unlock()
 }
 
 // --- opening files, folders, and links ------------------------------------------
@@ -426,8 +412,7 @@ func (l *Launcher) OpenPath(path string) error {
 // OpenURL opens a validated http(s) URL.
 func (l *Launcher) OpenURL(url string) error {
 	url = strings.TrimSpace(url)
-	if !strings.HasPrefix(strings.ToLower(url), "http://") &&
-		!strings.HasPrefix(strings.ToLower(url), "https://") {
+	if !isHTTPURL(url) {
 		return errors.New("only http and https links are allowed")
 	}
 	return openPath(url)
@@ -444,7 +429,7 @@ func (l *Launcher) PluginURL(id string) (string, error) {
 	if record == nil {
 		return "", errors.New("plugin was not found")
 	}
-	if record.UIDir == "" || record.UIEntry == "" {
+	if !record.hasUI() {
 		return "", errors.New("this plugin does not include a web UI")
 	}
 	if server == nil {
@@ -461,10 +446,7 @@ func (l *Launcher) PluginFolder(id string) (string, error) {
 	if record == nil {
 		return "", errors.New("plugin was not found")
 	}
-	if record.BundleRoot != "" {
-		return record.BundleRoot, nil
-	}
-	return filepath.Dir(record.DLLPath), nil
+	return record.folder(), nil
 }
 
 // --- updates ------------------------------------------------------------------------
@@ -505,7 +487,7 @@ func (l *Launcher) OpenUpdate() error {
 	}
 	url := view.ReleaseURL
 	if url == "" {
-		url = "https://github.com/HerokeyVN/SkyLoader/releases"
+		url = releasePageURL
 	}
 	return l.OpenURL(url)
 }

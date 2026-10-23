@@ -1,6 +1,6 @@
 //go:build windows
 
-// Settings schema and persistence: KnowsWhere SkyLoader's configuration lives,
+// Settings schema and persistence: where SkyLoader's configuration lives,
 // how it is read, migrated from the legacy INI, and written back.
 package launcher
 
@@ -124,13 +124,11 @@ func configFromLegacyINI(exeDir string) (Config, string) {
 // applyBuiltinPaths fills missing paths with built-in defaults, auto-detecting
 // Sky.exe in a Steam library, and enriches the status message.
 func (c *Config) applyBuiltinPaths(exeDir, status string) string {
-	if c.BootstrapPath == "" {
-		c.BootstrapPath = filepath.Join(exeDir, defaultBootstrap)
-	}
-	if !isRegularFile(c.BootstrapPath) {
-		if fallback := filepath.Join(exeDir, defaultBootstrap); isRegularFile(fallback) {
-			c.BootstrapPath = fallback
-		}
+	// An empty or missing bootstrap falls back to the one shipped beside the
+	// executable; an empty path takes that default even if the file is absent.
+	bundled := filepath.Join(exeDir, defaultBootstrap)
+	if c.BootstrapPath == "" || (!isRegularFile(c.BootstrapPath) && isRegularFile(bundled)) {
+		c.BootstrapPath = bundled
 	}
 	if c.GamePath == "" || !isRegularFile(c.GamePath) {
 		if detected := detectSkyPath(); detected != "" {
@@ -182,11 +180,10 @@ func (c *Config) sanitize(exeDir string) {
 
 // Save writes the configuration atomically.
 func (c Config) Save(path string) error {
-	data, err := json.MarshalIndent(c, "", "  ")
+	data, err := encodeJSON(c)
 	if err != nil {
 		return err
 	}
-	data = append(data, '\n')
 	return writeAtomic(".config-*.json", path, data)
 }
 
@@ -219,7 +216,6 @@ func ParseINI(data string) map[string]map[string]string {
 func MigrateINI(data, exeDir string) (Config, error) {
 	sections := ParseINI(data)
 	cfg := Defaults(exeDir)
-	cfg.AutoInject = true
 
 	if section := sections["skyloader"]; section != nil {
 		if value := section["gamepath"]; value != "" {
