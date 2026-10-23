@@ -21,26 +21,27 @@ const (
 	maxDownload    = 300 << 20
 )
 
+// UpdateView describes the last update check.
+type UpdateView struct {
+	Checking       bool   `json:"checking"`
+	Available      bool   `json:"available"`
+	LatestVersion  string `json:"latestVersion,omitempty"`
+	ReleaseURL     string `json:"releaseURL,omitempty"`
+	DownloadedPath string `json:"downloadedPath,omitempty"`
+	Message        string `json:"message,omitempty"`
+}
+
 // Asset is one GitHub release asset.
 type Asset struct {
 	Name               string `json:"name"`
 	BrowserDownloadURL string `json:"browser_download_url"`
 }
 
+// release mirrors the fields of GitHub's /releases/latest answer.
 type release struct {
 	TagName string  `json:"tag_name"`
 	HTMLURL string  `json:"html_url"`
 	Assets  []Asset `json:"assets"`
-}
-
-// UpdateResult describes the outcome of an update check and optional download.
-type UpdateResult struct {
-	Available      bool
-	LatestVersion  string
-	ReleaseURL     string
-	AssetURL       string
-	DownloadedPath string
-	Message        string
 }
 
 // compareVersions returns -1 when a is older than b, 0 when they are
@@ -67,6 +68,8 @@ func compareVersions(a, b string) int {
 	return strings.Compare(firstLabel, secondLabel)
 }
 
+// parseVersion splits a version into numeric segments, skipping the v/V
+// prefix and separator characters, plus the label after the first letter.
 func parseVersion(version string) ([]uint64, string) {
 	version = strings.TrimSpace(version)
 	if len(version) > 0 && (version[0] == 'v' || version[0] == 'V') {
@@ -94,13 +97,15 @@ func parseVersion(version string) ([]uint64, string) {
 	return numbers, ""
 }
 
-// checkForUpdates queries the latest GitHub release and downloads a newer installer.
-func checkForUpdates(ctx context.Context, currentVersion, userAgent, downloadDir string) (UpdateResult, error) {
-	result := UpdateResult{ReleaseURL: releasePageURL}
+// checkForUpdates queries the latest GitHub release, compares it with the
+// current version, and downloads a newer installer. The returned view is
+// also stored in State; a non-nil error always replaces view.Message.
+func checkForUpdates(ctx context.Context, currentVersion, userAgent, downloadDir string) (UpdateView, error) {
+	view := UpdateView{ReleaseURL: releasePageURL}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		"https://api.github.com/repos/"+owner+"/"+repo+"/releases/latest", nil)
 	if err != nil {
-		return result, err
+		return view, err
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
@@ -109,56 +114,56 @@ func checkForUpdates(ctx context.Context, currentVersion, userAgent, downloadDir
 	client := &http.Client{Timeout: 30 * time.Second}
 	response, err := client.Do(request)
 	if err != nil {
-		return result, fmt.Errorf("connect to GitHub: %w", err)
+		return view, fmt.Errorf("connect to GitHub: %w", err)
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode == http.StatusNotFound {
-		result.Message = "No GitHub release has been published yet."
-		return result, nil
+		view.Message = "No GitHub release has been published yet."
+		return view, nil
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return result, fmt.Errorf("GitHub update check failed (HTTP %d)", response.StatusCode)
+		return view, fmt.Errorf("GitHub update check failed (HTTP %d)", response.StatusCode)
 	}
 
 	var payload release
 	if err := json.NewDecoder(io.LimitReader(response.Body, 8<<20)).Decode(&payload); err != nil {
-		return result, fmt.Errorf("decode GitHub release: %w", err)
+		return view, fmt.Errorf("decode GitHub release: %w", err)
 	}
-	result.LatestVersion = strings.TrimSpace(payload.TagName)
-	result.ReleaseURL = payload.HTMLURL
-	if result.ReleaseURL == "" {
-		result.ReleaseURL = releasePageURL
+	view.LatestVersion = strings.TrimSpace(payload.TagName)
+	view.ReleaseURL = payload.HTMLURL
+	if view.ReleaseURL == "" {
+		view.ReleaseURL = releasePageURL
 	}
-	if result.LatestVersion == "" {
-		return result, errors.New("GitHub release has no version tag")
+	if view.LatestVersion == "" {
+		return view, errors.New("GitHub release has no version tag")
 	}
-	if compareVersions(currentVersion, result.LatestVersion) >= 0 {
-		result.Message = "SkyLoader is up to date."
-		return result, nil
+	if compareVersions(currentVersion, view.LatestVersion) >= 0 {
+		view.Message = "SkyLoader is up to date."
+		return view, nil
 	}
 
-	result.Available = true
-	result.AssetURL = selectAsset(payload.Assets)
-	if result.AssetURL == "" {
-		result.Message = "Update available, but the release has no .exe asset."
-		return result, nil
+	view.Available = true
+	assetURL := selectAsset(payload.Assets)
+	if assetURL == "" {
+		view.Message = "Update available, but the release has no .exe asset."
+		return view, nil
 	}
 	if downloadDir == "" {
-		result.Message = "Update available, but the update folder is unavailable."
-		return result, nil
+		view.Message = "Update available, but the update folder is unavailable."
+		return view, nil
 	}
 	if err := os.MkdirAll(downloadDir, 0o755); err != nil {
-		return result, err
+		return view, err
 	}
 
-	destination := filepath.Join(downloadDir, "SkyLoader-"+safeVersion(result.LatestVersion)+".exe")
-	if err := download(ctx, result.AssetURL, destination, userAgent); err != nil {
-		return result, err
+	destination := filepath.Join(downloadDir, "SkyLoader-"+safeVersion(view.LatestVersion)+".exe")
+	if err := download(ctx, assetURL, destination, userAgent); err != nil {
+		return view, err
 	}
-	result.DownloadedPath = destination
-	result.Message = "Update downloaded: " + result.LatestVersion
-	return result, nil
+	view.DownloadedPath = destination
+	view.Message = "Update downloaded: " + view.LatestVersion
+	return view, nil
 }
 
 // selectAsset prefers an installer, then the first downloadable .exe.

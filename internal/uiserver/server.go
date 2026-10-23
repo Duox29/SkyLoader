@@ -1,5 +1,6 @@
-// Package uiserver serves plugin UI bundles from the local machine and bridges
-// their JavaScript to the in-game plugin DLL.
+// Package uiserver serves plugin UI bundles from the local machine, bridges
+// their JavaScript to the in-game plugin DLL, and implements the named-pipe
+// contract with SkyBootstrap.
 package uiserver
 
 import (
@@ -102,7 +103,7 @@ func (s *Server) Close() error {
 }
 
 func (s *Server) handlePlugin(w http.ResponseWriter, request *http.Request) {
-	id, rest, ok := s.parsePluginPath(request.URL.Path)
+	id, rest, ok := s.segment(request.URL.Path, "/p/")
 	if !ok {
 		http.NotFound(w, request)
 		return
@@ -119,21 +120,25 @@ func (s *Server) handlePlugin(w http.ResponseWriter, request *http.Request) {
 		relative = strings.TrimPrefix(path.Clean("/"+rest), "/")
 	}
 	target := filepath.Join(root, filepath.FromSlash(relative))
-	if !inside(root, target) {
+	// Relative paths may not escape the bundle root.
+	if relative, err := filepath.Rel(root, target); err != nil ||
+		relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		http.NotFound(w, request)
 		return
 	}
 
-	info, err := os.Stat(target)
-	if err != nil {
-		if err != nil && !strings.Contains(path.Base(relative), ".") {
-			target = filepath.Join(root, filepath.FromSlash(entryPath(plugin.Entry)))
-		} else {
-			http.NotFound(w, request)
-			return
-		}
-	} else if info.IsDir() {
+	info, statErr := os.Stat(target)
+	switch {
+	case statErr == nil && info.IsDir():
 		target = filepath.Join(target, filepath.FromSlash(entryPath(plugin.Entry)))
+	case statErr == nil:
+		// An existing asset is served as-is.
+	case statErr != nil && !strings.Contains(path.Base(relative), "."):
+		// Route-less requests fall back to the bundle's entry page.
+		target = filepath.Join(root, filepath.FromSlash(entryPath(plugin.Entry)))
+	default:
+		http.NotFound(w, request)
+		return
 	}
 
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -204,12 +209,12 @@ func (s *Server) handleBridge(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleAPI(w http.ResponseWriter, request *http.Request) {
-	id, action, ok := s.parseAPIPath(request.URL.Path)
+	id, rest, ok := s.segment(request.URL.Path, "/api/")
 	if !ok {
 		http.NotFound(w, request)
 		return
 	}
-	switch action {
+	switch strings.TrimSuffix(rest, "/") {
 	case "rpc":
 		s.handleRPC(w, request, id)
 	case "events":
@@ -240,7 +245,9 @@ func (s *Server) handleRPC(w http.ResponseWriter, request *http.Request, id stri
 
 	response, err := s.source.PluginRPC(id, payload)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		// json.NewEncoder responses end with a newline; keep that wire format.
+		message, _ := json.Marshal(map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusBadGateway, append(message, '\n'))
 		return
 	}
 	if len(bytes.TrimSpace(response)) == 0 {
@@ -249,10 +256,7 @@ func (s *Server) handleRPC(w http.ResponseWriter, request *http.Request, id stri
 	if !json.Valid(response) {
 		response, _ = json.Marshal(map[string]string{"raw": string(response)})
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(response)
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, request *http.Request, id string) {
@@ -299,9 +303,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, request *http.Request, id s
 	}
 }
 
-// parsePluginPath splits /p/<token>/<id>/<rest> and validates the token.
-func (s *Server) parsePluginPath(requestPath string) (id, rest string, ok bool) {
-	trimmed := strings.TrimPrefix(requestPath, "/p/")
+// segment splits /<prefix>/<token>/<id>/<rest> and validates the token.
+func (s *Server) segment(requestPath, prefix string) (id, rest string, ok bool) {
+	trimmed := strings.TrimPrefix(requestPath, prefix)
 	if trimmed == requestPath {
 		return "", "", false
 	}
@@ -309,30 +313,13 @@ func (s *Server) parsePluginPath(requestPath string) (id, rest string, ok bool) 
 	if !found || token != s.token {
 		return "", "", false
 	}
-	rawID, remainder, found := strings.Cut(remainder, "/")
-	if !found || rawID == "" {
+	id, rest, found = strings.Cut(remainder, "/")
+	if !found || id == "" {
 		return "", "", false
 	}
 	// request.URL.Path is already percent-decoded; unescaping it again would
 	// corrupt legacy identities that contain a literal percent sign.
-	return rawID, remainder, true
-}
-
-// parseAPIPath splits /api/<token>/<id>/<action> and validates the token.
-func (s *Server) parseAPIPath(requestPath string) (id, action string, ok bool) {
-	trimmed := strings.TrimPrefix(requestPath, "/api/")
-	if trimmed == requestPath {
-		return "", "", false
-	}
-	token, remainder, found := strings.Cut(trimmed, "/")
-	if !found || token != s.token {
-		return "", "", false
-	}
-	rawID, remainder, found := strings.Cut(remainder, "/")
-	if !found || rawID == "" {
-		return "", "", false
-	}
-	return rawID, strings.TrimSuffix(remainder, "/"), true
+	return id, rest, true
 }
 
 func entryPath(entry string) string {
@@ -343,17 +330,10 @@ func entryPath(entry string) string {
 	return entry
 }
 
-func inside(root, target string) bool {
-	relative, err := filepath.Rel(root, target)
-	if err != nil {
-		return false
-	}
-	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
-}
-
-func writeJSON(w http.ResponseWriter, status int, value any) {
+// writeJSON sends a JSON body with the shared no-cache headers.
+func writeJSON(w http.ResponseWriter, status int, body []byte) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
+	_, _ = w.Write(body)
 }

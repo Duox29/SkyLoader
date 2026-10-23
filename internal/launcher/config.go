@@ -49,9 +49,8 @@ func AppDir(exeDir string) string {
 }
 
 func PluginDir(exeDir string) string  { return filepath.Join(AppDir(exeDir), legacyPluginFolder) }
-func LogsDir(exeDir string) string    { return filepath.Join(AppDir(exeDir), "logs") }
 func UpdatesDir(exeDir string) string { return filepath.Join(AppDir(exeDir), "updates") }
-func LogPath(exeDir string) string    { return filepath.Join(LogsDir(exeDir), "SkyLoader.log") }
+func LogPath(exeDir string) string    { return filepath.Join(AppDir(exeDir), "logs", "SkyLoader.log") }
 func ConfigPath(exeDir string) string { return filepath.Join(AppDir(exeDir), configFileName) }
 
 // Defaults returns a configuration with sane paths for a fresh install.

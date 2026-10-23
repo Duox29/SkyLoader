@@ -43,16 +43,6 @@ type PluginView struct {
 	Loaded      bool   `json:"loaded"`
 }
 
-// UpdateView describes the last update check.
-type UpdateView struct {
-	Checking       bool   `json:"checking"`
-	Available      bool   `json:"available"`
-	LatestVersion  string `json:"latestVersion,omitempty"`
-	ReleaseURL     string `json:"releaseURL,omitempty"`
-	DownloadedPath string `json:"downloadedPath,omitempty"`
-	Message        string `json:"message,omitempty"`
-}
-
 // State is the complete snapshot sent to the frontend.
 type State struct {
 	Version        string       `json:"version"`
@@ -328,7 +318,7 @@ func (l *Launcher) Launch() (string, error) {
 		return "Sky.exe is already running; loading SkyBootstrap.", nil
 	}
 
-	if err := openURL("steam://run/2325290"); err != nil {
+	if err := openPath("steam://run/2325290"); err != nil {
 		return "", fmt.Errorf("could not open Steam: %w", err)
 	}
 	l.mu.Lock()
@@ -370,7 +360,7 @@ func (l *Launcher) OpenURL(url string) error {
 		!strings.HasPrefix(strings.ToLower(url), "https://") {
 		return errors.New("only http and https links are allowed")
 	}
-	return openURL(url)
+	return openPath(url)
 }
 
 // PluginURL returns the authenticated local URL for a plugin's UI.
@@ -393,7 +383,9 @@ func (l *Launcher) PluginURL(id string) (string, error) {
 
 // PluginFolder returns the folder containing a plugin's bundle or DLL.
 func (l *Launcher) PluginFolder(id string) (string, error) {
-	record := l.plugin(id)
+	l.mu.RLock()
+	record := l.plugins[strings.ToLower(id)]
+	l.mu.RUnlock()
 	if record == nil {
 		return "", errors.New("plugin was not found")
 	}
@@ -419,13 +411,7 @@ func (l *Launcher) CheckUpdates(ctx context.Context) (UpdateView, error) {
 	result, err := checkForUpdates(ctx, l.version, "SkyLoader/"+l.version, UpdatesDir(l.exeDir))
 
 	l.mu.Lock()
-	l.update = UpdateView{
-		Available:      result.Available,
-		LatestVersion:  result.LatestVersion,
-		ReleaseURL:     result.ReleaseURL,
-		DownloadedPath: result.DownloadedPath,
-		Message:        result.Message,
-	}
+	l.update = result
 	if err != nil {
 		l.update.Message = err.Error()
 	}
@@ -448,12 +434,6 @@ func (l *Launcher) OpenUpdate() error {
 		url = "https://github.com/HerokeyVN/SkyLoader/releases"
 	}
 	return l.OpenURL(url)
-}
-
-func (l *Launcher) plugin(id string) *pluginRecord {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return l.plugins[strings.ToLower(id)]
 }
 
 func (l *Launcher) saveConfig(status string, edit func(*Config)) error {

@@ -58,37 +58,10 @@ func startHost() {
 		globalHost = newHost()
 		logCallbackPtr = syscall.NewCallback(logTrampoline)
 		postCallbackPtr = syscall.NewCallback(postEventTrampoline)
-		globalHost.logf("SkyBootstrap %s starting in PID %d (ABI %d)",
+		globalHost.logger.Printf("SkyBootstrap %s starting in PID %d (ABI %d)",
 			version, windows.GetCurrentProcessId(), apiVersion)
 		go globalHost.pipeLoop()
 	})
-}
-
-// loadPlugin loads and initializes one plugin DLL.
-func loadPlugin(path string) (bool, error) {
-	startHost()
-	if globalHost == nil {
-		return false, errors.New("SkyBootstrap host is not available")
-	}
-	return true, globalHost.loadPlugin(path)
-}
-
-// unloadPlugin calls SkyPluginShutdown, if present, and unloads the DLL.
-func unloadPlugin(path string) (bool, error) {
-	startHost()
-	if globalHost == nil {
-		return false, errors.New("SkyBootstrap host is not available")
-	}
-	return true, globalHost.unloadPlugin(path)
-}
-
-// pluginCount returns the number of loaded plugins.
-func pluginCount() uint32 {
-	startHost()
-	if globalHost == nil {
-		return 0
-	}
-	return globalHost.pluginCount()
 }
 
 type host struct {
@@ -155,13 +128,9 @@ func newHost() *host {
 	return h
 }
 
-func (h *host) logf(format string, args ...any) {
-	h.logger.Printf(format, args...)
-}
-
 func logTrampoline(message *byte) uintptr {
 	if globalHost != nil && message != nil {
-		globalHost.logf("%s", windows.BytePtrToString(message))
+		globalHost.logger.Printf("%s", windows.BytePtrToString(message))
 	}
 	return 0
 }
@@ -224,7 +193,15 @@ func (h *host) loadPlugin(rawPath string) error {
 	uiProc, _ := windows.GetProcAddress(module, "SkyPluginUiMessage")
 
 	context := h.allocateContext()
-	api := h.allocateAPI(context)
+	// The API contains only integer callback addresses, so keeping it in Go
+	// memory is safe. plugin.api keeps it reachable for as long as the plugin
+	// may call into the host.
+	api := &pluginAPI{
+		Version:      apiVersion,
+		Log:          logCallbackPtr,
+		PostEvent:    postCallbackPtr,
+		EventContext: context,
+	}
 
 	plugin := &pluginHost{
 		path:      path,
@@ -253,7 +230,7 @@ func (h *host) loadPlugin(rawPath string) error {
 	h.mu.Lock()
 	h.plugins[key] = plugin
 	h.mu.Unlock()
-	h.logf("Loaded plugin %s", path)
+	h.logger.Printf("Loaded plugin %s", path)
 	return nil
 }
 
@@ -287,7 +264,7 @@ func (h *host) unloadPlugin(rawPath string) error {
 	h.mu.Unlock()
 
 	_ = windows.FreeLibrary(plugin.module)
-	h.logf("Unloaded plugin %s", path)
+	h.logger.Printf("Unloaded plugin %s", path)
 	return nil
 }
 
@@ -303,24 +280,6 @@ func (h *host) allocateContext() uintptr {
 			return h.nextContext
 		}
 	}
-}
-
-func (h *host) allocateAPI(context uintptr) *pluginAPI {
-	// The API contains only integer callback addresses, so keeping it in Go
-	// memory is safe. pluginHost.api keeps it reachable for as long as the
-	// plugin may call into the host.
-	return &pluginAPI{
-		Version:      apiVersion,
-		Log:          logCallbackPtr,
-		PostEvent:    postCallbackPtr,
-		EventContext: context,
-	}
-}
-
-func (h *host) pluginCount() uint32 {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return uint32(len(h.plugins))
 }
 
 func (h *host) listPlugins() []string {
@@ -439,7 +398,7 @@ func (h *host) pollEvents(rawPath string) []byte {
 func (h *host) pipeLoop() {
 	name, err := windows.UTF16PtrFromString(pipeName)
 	if err != nil {
-		h.logf("invalid pipe name: %v", err)
+		h.logger.Printf("invalid pipe name: %v", err)
 		return
 	}
 	for {
@@ -449,7 +408,7 @@ func (h *host) pipeLoop() {
 			windows.PIPE_UNLIMITED_INSTANCES,
 			pipeBuffer, pipeBuffer, 0, nil)
 		if err != nil {
-			h.logf("CreateNamedPipe failed: %v", err)
+			h.logger.Printf("CreateNamedPipe failed: %v", err)
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
@@ -474,7 +433,7 @@ func (h *host) handleConnection(pipe windows.Handle) {
 		if err != nil {
 			if !errors.Is(err, windows.ERROR_BROKEN_PIPE) &&
 				!errors.Is(err, windows.ERROR_PIPE_NOT_CONNECTED) {
-				h.logf("pipe read: %v", err)
+				h.logger.Printf("pipe read: %v", err)
 			}
 			return
 		}
@@ -485,7 +444,7 @@ func (h *host) handleConnection(pipe windows.Handle) {
 		response := h.handleCommand(command)
 		var written uint32
 		if err := windows.WriteFile(pipe, []byte(response), &written, nil); err != nil {
-			h.logf("pipe write: %v", err)
+			h.logger.Printf("pipe write: %v", err)
 			return
 		}
 		_ = windows.FlushFileBuffers(pipe)
@@ -569,7 +528,8 @@ func init() {
 
 // The exported functions below are the stable C entry points used by native
 // plugins and external tools. The named-pipe server is started when the DLL
-// loads; these functions are a secondary interface.
+// loads; these functions are a secondary interface. startHost guarantees a
+// non-nil globalHost before each call.
 
 //export SkyBootstrapStart
 func SkyBootstrapStart() C.int {
@@ -577,31 +537,43 @@ func SkyBootstrapStart() C.int {
 	return 1
 }
 
+// SkyBootstrapLoadPluginW loads and initializes one plugin DLL.
+//
 //export SkyBootstrapLoadPluginW
 func SkyBootstrapLoadPluginW(path *C.wchar_t) C.int {
 	if path == nil {
 		return 0
 	}
-	if ok, err := loadPlugin(windows.UTF16PtrToString((*uint16)(unsafe.Pointer(path)))); err != nil || !ok {
+	startHost()
+	if err := globalHost.loadPlugin(windows.UTF16PtrToString((*uint16)(unsafe.Pointer(path)))); err != nil {
 		return 0
 	}
 	return 1
 }
 
+// SkyBootstrapUnloadPluginW calls SkyPluginShutdown, if present, and unloads
+// the DLL.
+//
 //export SkyBootstrapUnloadPluginW
 func SkyBootstrapUnloadPluginW(path *C.wchar_t) C.int {
 	if path == nil {
 		return 0
 	}
-	if ok, err := unloadPlugin(windows.UTF16PtrToString((*uint16)(unsafe.Pointer(path)))); err != nil || !ok {
+	startHost()
+	if err := globalHost.unloadPlugin(windows.UTF16PtrToString((*uint16)(unsafe.Pointer(path)))); err != nil {
 		return 0
 	}
 	return 1
 }
 
+// SkyBootstrapPluginCount returns the number of loaded plugins.
+//
 //export SkyBootstrapPluginCount
 func SkyBootstrapPluginCount() C.uint32_t {
-	return C.uint32_t(pluginCount())
+	startHost()
+	globalHost.mu.RLock()
+	defer globalHost.mu.RUnlock()
+	return C.uint32_t(len(globalHost.plugins))
 }
 
 //export SkyBootstrapApiVersion

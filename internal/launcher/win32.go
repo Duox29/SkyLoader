@@ -29,15 +29,6 @@ type Process struct {
 	Path string
 }
 
-// Info is the normalized plugin manifest from a DLL's VERSIONINFO resource.
-type Info struct {
-	ID          string
-	Version     string
-	Name        string
-	Author      string
-	Description string
-}
-
 var (
 	kernel32               = windows.NewLazySystemDLL("kernel32.dll")
 	procCreateRemoteThread = kernel32.NewProc("CreateRemoteThread")
@@ -82,7 +73,11 @@ func findProcess(exeName, expectedPath string) (Process, bool) {
 		if err != nil {
 			continue
 		}
-		path := processImageName(process)
+		buffer := make([]uint16, 32768)
+		var path string
+		if size := uint32(len(buffer)); windows.QueryFullProcessImageName(process, 0, &buffer[0], &size) == nil {
+			path = normalizePath(windows.UTF16ToString(buffer[:size]))
+		}
 		windows.CloseHandle(process)
 		if path == "" {
 			continue
@@ -98,93 +93,68 @@ func findProcess(exeName, expectedPath string) (Process, bool) {
 	return fallback, fallback.PID != 0
 }
 
-func processImageName(process windows.Handle) string {
-	buffer := make([]uint16, 32768)
-	size := uint32(len(buffer))
-	if err := windows.QueryFullProcessImageName(process, 0, &buffer[0], &size); err != nil {
-		return ""
-	}
-	return normalizePath(windows.UTF16ToString(buffer[:size]))
-}
-
-type versionTable map[string]string
-
-func readVersionInfo(path string) (Info, error) {
+// readVersionInfo extracts plugin metadata from a DLL's VERSIONINFO resource.
+// The string table anchored by SkyPluginId wins; its remaining values fall
+// back across their common variants. All Manifest path fields stay empty.
+func readVersionInfo(path string) (Manifest, error) {
 	size, err := windows.GetFileVersionInfoSize(path, nil)
 	if err != nil {
-		return Info{}, err
+		return Manifest{}, err
 	}
 	if size == 0 {
-		return Info{}, errors.New("no VERSIONINFO resource")
+		return Manifest{}, errors.New("no VERSIONINFO resource")
 	}
 	data := make([]byte, size)
 	if err := windows.GetFileVersionInfo(path, 0, size, unsafe.Pointer(&data[0])); err != nil {
-		return Info{}, err
+		return Manifest{}, err
 	}
 	block := unsafe.Pointer(&data[0])
 
-	var tables []versionTable
+	var pairs [][2]uint16
 	var translations unsafe.Pointer
 	var length uint32
 	if windows.VerQueryValue(block, `\VarFileInfo\Translation`, unsafe.Pointer(&translations), &length) == nil &&
 		translations != nil && length >= 4 {
-		pairs := unsafe.Slice((*uint16)(translations), length/2)
-		for i := 0; i+1 < len(pairs); i += 2 {
-			tables = append(tables, readStringTable(block, pairs[i], pairs[i+1]))
+		words := unsafe.Slice((*uint16)(translations), length/2)
+		for i := 0; i+1 < len(words); i += 2 {
+			pairs = append(pairs, [2]uint16{words[i], words[i+1]})
 		}
 	}
-	if len(tables) == 0 {
+	if len(pairs) == 0 {
 		// A few hand-built resources omit VarFileInfo; probe the usual
 		// Unicode code pages instead of rejecting otherwise valid metadata.
-		for _, pair := range [][2]uint16{{0x0409, 0x04B0}, {0x0000, 0x04B0}, {0x0409, 0x04E4}} {
-			tables = append(tables, readStringTable(block, pair[0], pair[1]))
+		pairs = [][2]uint16{{0x0409, 0x04B0}, {0x0000, 0x04B0}, {0x0409, 0x04E4}}
+	}
+	for _, pair := range pairs {
+		prefix := fmt.Sprintf(`\StringFileInfo\%04x%04x\`, pair[0], pair[1])
+		value := func(key string) string {
+			var buffer *uint16
+			var size uint32
+			if windows.VerQueryValue(block, prefix+key, unsafe.Pointer(&buffer), &size) != nil ||
+				buffer == nil || size == 0 {
+				return ""
+			}
+			return windows.UTF16PtrToString(buffer)
 		}
-	}
-	return infoFromTables(tables)
-}
-
-func readStringTable(block unsafe.Pointer, language, codePage uint16) versionTable {
-	prefix := fmt.Sprintf(`\StringFileInfo\%04x%04x\`, language, codePage)
-	table := versionTable{}
-	for _, key := range []string{
-		"SkyPluginId", "Version", "ProductVersion", "FileVersion",
-		"PluginName", "ProductName", "Author", "CompanyName",
-		"Description", "FileDescription",
-	} {
-		table[key] = versionString(block, prefix+key)
-	}
-	return table
-}
-
-func versionString(block unsafe.Pointer, path string) string {
-	var buffer *uint16
-	var length uint32
-	if windows.VerQueryValue(block, path, unsafe.Pointer(&buffer), &length) != nil ||
-		buffer == nil || length == 0 {
-		return ""
-	}
-	return windows.UTF16PtrToString(buffer)
-}
-
-func infoFromTables(tables []versionTable) (Info, error) {
-	for _, table := range tables {
-		id := Canonical(table["SkyPluginId"])
+		id := Canonical(value("SkyPluginId"))
 		if id == "" {
 			continue
 		}
-		return Info{
+		return Manifest{
 			ID:          id,
-			Version:     firstNonEmpty(table["Version"], table["ProductVersion"], table["FileVersion"]),
-			Name:        firstNonEmpty(table["PluginName"], table["ProductName"]),
-			Author:      firstNonEmpty(table["Author"], table["CompanyName"]),
-			Description: firstNonEmpty(table["Description"], table["FileDescription"]),
+			Version:     firstNonEmpty(value("Version"), value("ProductVersion"), value("FileVersion")),
+			Name:        firstNonEmpty(value("PluginName"), value("ProductName")),
+			Author:      firstNonEmpty(value("Author"), value("CompanyName")),
+			Description: firstNonEmpty(value("Description"), value("FileDescription")),
 		}, nil
 	}
-	return Info{}, errors.New("no usable SkyPluginId in VERSIONINFO")
+	return Manifest{}, errors.New("no usable SkyPluginId in VERSIONINFO")
 }
 
 // injectDLL loads dllPath into the target process with a remote LoadLibraryW
-// call and waits for the load to finish.
+// call and waits for the load to finish. CreateRemoteThread and its
+// VirtualAllocEx/GetExitCodeThread companions have no typed wrappers in
+// golang.org/x/sys/windows, so they go through lazy procedure calls.
 func injectDLL(pid uint32, dllPath string, timeout time.Duration) error {
 	dllPath = normalizePath(dllPath)
 	if !isRegularFile(dllPath) {
@@ -243,15 +213,11 @@ func injectDLL(pid uint32, dllPath string, timeout time.Duration) error {
 	return nil
 }
 
-// openPath opens a file or folder with the user's default handler.
+// openPath opens a file, folder, or URL with the user's default handler.
+// OpenURL validates http(s) links before reaching this point.
 func openPath(path string) error {
 	return windows.ShellExecute(0, windows.StringToUTF16Ptr("open"),
 		windows.StringToUTF16Ptr(path), nil, nil, windows.SW_SHOWNORMAL)
-}
-
-// openURL opens a URL with the default browser or protocol handler.
-func openURL(url string) error {
-	return openPath(url)
 }
 
 // detectSkyPath searches Steam's registry entries, all library folders, and

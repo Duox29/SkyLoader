@@ -82,9 +82,9 @@ func TestPluginPageAndAssets(t *testing.T) {
 
 func TestParsePluginPathKeepsDecodedPercent(t *testing.T) {
 	server := &Server{token: "token"}
-	id, rest, ok := server.parsePluginPath("/p/token/100%.dll/index.html")
+	id, rest, ok := server.segment("/p/token/100%.dll/index.html", "/p/")
 	if !ok || id != "100%.dll" || rest != "index.html" {
-		t.Fatalf("parsePluginPath = %q, %q, %v", id, rest, ok)
+		t.Fatalf("segment = %q, %q, %v", id, rest, ok)
 	}
 }
 

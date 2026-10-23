@@ -90,14 +90,33 @@ func TestZipSlipRejected(t *testing.T) {
 	}
 }
 
-func TestSafeRelative(t *testing.T) {
-	for _, unsafe := range []string{"../escape", `C:\escape`, "C:/escape", `\\server\share`, "/etc/passwd", "a/../../b"} {
-		if _, err := safeRelative(unsafe); err == nil {
-			t.Fatalf("expected %q to be rejected", unsafe)
+// TestManifestRejectsUnsafePaths covers manifest path normalization through
+// readManifest, where the validation lives.
+func TestManifestRejectsUnsafePaths(t *testing.T) {
+	for _, manifest := range []string{
+		`{"dll":"../escape.dll"}`,
+		`{"dll":"C:\\escape.dll"}`,
+		`{"dll":"C:/escape.dll"}`,
+		`{"ui":"\\\\server\\\\share"}`,
+		`{"ui":"/etc/escape"}`,
+		`{"uiEntry":"a/../../b"}`,
+	} {
+		root := t.TempDir()
+		writeFile(t, filepath.Join(root, "plugin.json"), manifest)
+		if _, err := readManifest(root); err == nil {
+			t.Fatalf("expected %s to be rejected", manifest)
 		}
 	}
-	if got, err := safeRelative("ui/index.html"); err != nil || got != "ui/index.html" {
-		t.Fatalf("safeRelative = %q, %v", got, err)
+
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "plugin.json"),
+		`{"dll":"bin/mod.dll","ui":"ui","uiEntry":"ui/index.html"}`)
+	manifest, err := readManifest(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.DLL != "bin/mod.dll" || manifest.UI != "ui" || manifest.UIEntry != "ui/index.html" {
+		t.Fatalf("manifest paths were not normalized: %+v", manifest)
 	}
 }
 
@@ -152,25 +171,6 @@ func TestDirectoryNameRejectsWindowsSpecialNames(t *testing.T) {
 		if name == strings.ToLower(id) {
 			t.Fatalf("DirectoryName(%q) returned an unsafe name unchanged", id)
 		}
-	}
-}
-
-func TestInfoFromTablesAllowsMissingVersion(t *testing.T) {
-	info, err := infoFromTables([]versionTable{
-		{"ProductName": "No identity"},
-		{"SkyPluginId": "example.author.plugin", "PluginName": "Example Plugin"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.ID != "example.author.plugin" || info.Version != "" || info.Name != "Example Plugin" {
-		t.Fatalf("info = %+v", info)
-	}
-}
-
-func TestInfoFromTablesRequiresID(t *testing.T) {
-	if _, err := infoFromTables([]versionTable{{"Version": "1.0.0"}}); err == nil {
-		t.Fatal("expected missing SkyPluginId to fail")
 	}
 }
 
